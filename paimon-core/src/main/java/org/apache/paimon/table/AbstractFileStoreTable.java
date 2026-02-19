@@ -221,7 +221,7 @@ abstract class AbstractFileStoreTable implements FileStoreTable {
             case HASH_FIXED:
                 return Optional.of(
                         new FixedBucketWriteSelector(
-                                schema(), PartitionBucketMapping.lazyLoadFromTable(this)));
+                                schema(), PartitionBucketMapping.loadFromTable(this)));
             case BUCKET_UNAWARE:
             case POSTPONE_MODE:
                 return Optional.empty();
@@ -240,7 +240,7 @@ abstract class AbstractFileStoreTable implements FileStoreTable {
         switch (bucketMode()) {
             case HASH_FIXED:
                 return new FixedBucketRowKeyExtractor(
-                        schema(), PartitionBucketMapping.lazyLoadFromTable(this));
+                        schema(), PartitionBucketMapping.loadFromTable(this));
             case HASH_DYNAMIC:
             case KEY_DYNAMIC:
                 return new DynamicBucketRowKeyExtractor(schema());
