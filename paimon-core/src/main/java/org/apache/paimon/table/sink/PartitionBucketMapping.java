@@ -19,7 +19,7 @@
 package org.apache.paimon.table.sink;
 
 import org.apache.paimon.data.BinaryRow;
-import org.apache.paimon.manifest.ManifestEntry;
+import org.apache.paimon.manifest.SimpleFileEntry;
 import org.apache.paimon.table.FileStoreTable;
 
 import java.io.Serializable;
@@ -93,11 +93,14 @@ public class PartitionBucketMapping implements Serializable {
         }
 
         try {
-            List<ManifestEntry> entries = table.store().newScan().plan().files();
+            List<SimpleFileEntry> entries = table.store().newScan().readSimpleEntries();
             Map<BinaryRow, Integer> partitionBucketMap = new HashMap<>();
-            for (ManifestEntry entry : entries) {
+            for (SimpleFileEntry entry : entries) {
                 int totalBuckets = entry.totalBuckets();
-                if (totalBuckets > 0) {
+                // Only store partitions whose bucket count differs from the default.
+                // This keeps the map empty for partitions that have never been rescaled,
+                // avoiding per-partition BinaryRow copies and Integer allocations entirely.
+                if (totalBuckets > 0 && totalBuckets != defaultBuckets) {
                     BinaryRow partition = entry.partition();
                     partitionBucketMap.putIfAbsent(partition.copy(), totalBuckets);
                 }
