@@ -37,6 +37,9 @@ import org.apache.paimon.options.MemorySize;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.MutableObjectIterator;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -46,6 +49,8 @@ import static org.apache.paimon.codegen.CodeGenUtils.newRecordComparator;
 
 /** A spillable {@link SortBuffer}. */
 public class BinaryExternalSortBuffer implements SortBuffer {
+
+    private static final Logger SPILL_LOG = LoggerFactory.getLogger(BinaryExternalSortBuffer.class);
 
     private final BinaryRowSerializer serializer;
     private final BinaryInMemorySortBuffer inMemorySortBuffer;
@@ -257,6 +262,16 @@ public class BinaryExternalSortBuffer implements SortBuffer {
         ChannelWriterOutputView output = null;
         int blockCount;
 
+        long t0 = System.nanoTime();
+        long inMemRecords = inMemorySortBuffer.size();
+        long inMemBytes = inMemorySortBuffer.getOccupancy();
+        SPILL_LOG.info(
+                "Sort spill START path={} inMemRecords={} inMemBytes={} priorSpillFiles={}",
+                channel.getPath(),
+                inMemRecords,
+                inMemBytes,
+                spillChannelIDs.size());
+
         try {
             output =
                     FileChannelUtil.createOutputView(
@@ -270,8 +285,25 @@ public class BinaryExternalSortBuffer implements SortBuffer {
                 output.close();
                 output.getChannel().deleteChannel();
             }
+            SPILL_LOG.warn(
+                    "Sort spill FAILED path={} after elapsedMs={}",
+                    channel.getPath(),
+                    (System.nanoTime() - t0) / 1_000_000,
+                    e);
             throw e;
         }
+
+        long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+        long writeBytes = output.getWriteBytes();
+        SPILL_LOG.info(
+                "Sort spill END   path={} blocks={} writeBytes={} elapsedMs={} writeMBps={} totalSpillFiles={}",
+                channel.getPath(),
+                blockCount,
+                writeBytes,
+                elapsedMs,
+                String.format(
+                        "%.2f", writeBytes / 1024.0 / 1024.0 / Math.max(elapsedMs / 1000.0, 1e-9)),
+                spillChannelIDs.size() + 1);
 
         spillChannelIDs.add(new ChannelWithMeta(channel, blockCount, output.getWriteBytes()));
         inMemorySortBuffer.clear();

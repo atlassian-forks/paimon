@@ -117,6 +117,28 @@ public abstract class AbstractBinaryExternalMerger<Entry> implements Closeable {
      */
     public List<ChannelWithMeta> mergeChannelList(List<ChannelWithMeta> channelIDs)
             throws IOException {
+        long mergeRoundStart = System.nanoTime();
+        long totalIn = 0L;
+        for (ChannelWithMeta m : channelIDs) {
+            totalIn += m.getNumBytes();
+        }
+        LOG.info(
+                "mergeChannelList ROUND start inputChannels={} totalInputBytes={} maxFanIn={}",
+                channelIDs.size(),
+                totalIn,
+                maxFanIn);
+        try {
+            return mergeChannelListInternal(channelIDs);
+        } finally {
+            LOG.info(
+                    "mergeChannelList ROUND end   inputChannels={} elapsedMs={}",
+                    channelIDs.size(),
+                    (System.nanoTime() - mergeRoundStart) / 1_000_000);
+        }
+    }
+
+    private List<ChannelWithMeta> mergeChannelListInternal(List<ChannelWithMeta> channelIDs)
+            throws IOException {
         // A channel list with length maxFanIn<sup>i</sup> can be merged to maxFanIn files in i-1
         // rounds where every merge
         // is a full merge with maxFanIn input channels. A partial round includes merges with fewer
@@ -173,6 +195,20 @@ public abstract class AbstractBinaryExternalMerger<Entry> implements Closeable {
         channelManager.addChannel(mergedChannelID);
         ChannelWriterOutputView output = null;
 
+        long inputBytesEstimate = 0L;
+        long inputBlocks = 0L;
+        for (ChannelWithMeta meta : channelIDs) {
+            inputBytesEstimate += meta.getNumBytes();
+            inputBlocks += meta.getBlockCount();
+        }
+        long t0 = System.nanoTime();
+        LOG.info(
+                "External merge START inputChannels={} inputBlocks={} inputBytes~={} -> outputPath={}",
+                channelIDs.size(),
+                inputBlocks,
+                inputBytesEstimate,
+                mergedChannelID.getPath());
+
         int numBlocksWritten;
         try {
             output =
@@ -189,6 +225,11 @@ public abstract class AbstractBinaryExternalMerger<Entry> implements Closeable {
                 output.close();
                 output.getChannel().deleteChannel();
             }
+            LOG.warn(
+                    "External merge FAILED outputPath={} after elapsedMs={}",
+                    mergedChannelID.getPath(),
+                    (System.nanoTime() - t0) / 1_000_000,
+                    e);
             throw e;
         } finally {
             // remove, close and delete channels
@@ -200,6 +241,18 @@ public abstract class AbstractBinaryExternalMerger<Entry> implements Closeable {
                 }
             }
         }
+
+        long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+        long outBytes = output.getWriteBytes();
+        LOG.info(
+                "External merge END   inputChannels={} outputPath={} outputBlocks={} outputBytes={} elapsedMs={} writeMBps={}",
+                channelIDs.size(),
+                mergedChannelID.getPath(),
+                numBlocksWritten,
+                outBytes,
+                elapsedMs,
+                String.format(
+                        "%.2f", outBytes / 1024.0 / 1024.0 / Math.max(elapsedMs / 1000.0, 1e-9)));
 
         return new ChannelWithMeta(mergedChannelID, numBlocksWritten, output.getWriteBytes());
     }

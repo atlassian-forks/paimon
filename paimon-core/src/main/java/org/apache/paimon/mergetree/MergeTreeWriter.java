@@ -42,6 +42,9 @@ import org.apache.paimon.utils.CommitIncrement;
 import org.apache.paimon.utils.FieldsComparator;
 import org.apache.paimon.utils.RecordWriter;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import javax.annotation.Nullable;
 
 import java.util.ArrayList;
@@ -56,6 +59,8 @@ import java.util.stream.Collectors;
 
 /** A {@link RecordWriter} to write records and generate {@link CompactIncrement}. */
 public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
+
+    private static final Logger LOG = LoggerFactory.getLogger(MergeTreeWriter.class);
 
     private final boolean writeBufferSpillable;
     private final MemorySize maxDiskSize;
@@ -220,6 +225,16 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
             final RollingFileWriter<KeyValue, DataFileMeta> dataWriter =
                     writerFactory.createRollingMergeTreeFileWriter(0, FileSource.APPEND);
 
+            long flushStart = System.nanoTime();
+            int bufferRecords = writeBuffer.size();
+            long bufferBytes = writeBuffer.memoryOccupancy();
+            LOG.info(
+                    "MergeTreeWriter flushWriteBuffer START records={} bytes={} waitForCompaction={} forcedFullCompaction={}",
+                    bufferRecords,
+                    bufferBytes,
+                    waitForLatestCompaction,
+                    forcedFullCompaction);
+
             try {
                 writeBuffer.forEach(
                         keyComparator,
@@ -238,10 +253,31 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
                 newFilesChangelog.addAll(changelogWriter.result());
             }
 
+            long totalRows = 0L;
+            long totalSize = 0L;
             for (DataFileMeta fileMeta : dataWriter.result()) {
+                LOG.info(
+                        "MergeTreeWriter rolled L0 file name={} level={} rows={} sizeBytes={}",
+                        fileMeta.fileName(),
+                        fileMeta.level(),
+                        fileMeta.rowCount(),
+                        fileMeta.fileSize());
+                totalRows += fileMeta.rowCount();
+                totalSize += fileMeta.fileSize();
                 newFiles.add(fileMeta);
                 compactManager.addNewFile(fileMeta);
             }
+
+            long elapsedMs = (System.nanoTime() - flushStart) / 1_000_000;
+            LOG.info(
+                    "MergeTreeWriter flushWriteBuffer END   files={} totalRows={} totalSizeBytes={} elapsedMs={} writeMBps={}",
+                    dataWriter.result().size(),
+                    totalRows,
+                    totalSize,
+                    elapsedMs,
+                    String.format(
+                            "%.2f",
+                            totalSize / 1024.0 / 1024.0 / Math.max(elapsedMs / 1000.0, 1e-9)));
         }
 
         trySyncLatestCompaction(waitForLatestCompaction);
