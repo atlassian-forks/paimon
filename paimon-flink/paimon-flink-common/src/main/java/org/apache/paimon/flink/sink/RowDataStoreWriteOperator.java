@@ -23,6 +23,7 @@ import org.apache.paimon.flink.log.LogWriteCallback;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.SinkRecord;
+import org.apache.paimon.utils.RateLogger;
 
 import org.apache.flink.api.common.functions.Function;
 import org.apache.flink.api.common.functions.OpenContext;
@@ -41,6 +42,8 @@ import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.streaming.util.functions.StreamingFunctionUtils;
+
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
@@ -61,6 +64,14 @@ public class RowDataStoreWriteOperator extends TableWriteOperator<InternalRow> {
     private transient SimpleContext sinkContext;
     @Nullable private transient LogWriteCallback logCallback;
     private transient boolean logIgnoreDelete;
+
+    // Sampled ingress-rate logger so you can see the upstream feed-rate per subtask
+    // even when no other Paimon log lines fire (e.g. when the writer thread is blocked
+    // in disk I/O during external sort/merge).
+    private static final long INGRESS_LOG_EVERY_RECORDS =
+            Long.getLong("paimon.sink.ingress.log.every.records", 1_000_000L);
+
+    private transient RateLogger ingressRate;
 
     /** We listen to this ourselves because we don't have an {@link InternalTimerService}. */
     private long currentWatermark = Long.MIN_VALUE;
@@ -97,6 +108,17 @@ public class RowDataStoreWriteOperator extends TableWriteOperator<InternalRow> {
         super.open();
 
         this.sinkContext = new SimpleContext(getProcessingTimeService());
+        // Use the operator name (which carries table name + subtask index) so logs are
+        // immediately greppable for a specific (211/512) subtask.
+        String name =
+                getRuntimeContext() != null
+                        ? getRuntimeContext().getTaskInfo().getTaskNameWithSubtasks()
+                        : "RowDataStoreWriteOperator";
+        this.ingressRate =
+                new RateLogger(
+                        LoggerFactory.getLogger(RowDataStoreWriteOperator.class),
+                        "sink-ingress " + name,
+                        INGRESS_LOG_EVERY_RECORDS);
         if (logSinkFunction != null) {
             openFunction(logSinkFunction);
             logCallback = new LogWriteCallback();
@@ -144,6 +166,10 @@ public class RowDataStoreWriteOperator extends TableWriteOperator<InternalRow> {
             throw new IOException(e);
         }
 
+        if (ingressRate != null) {
+            ingressRate.onUnit(0L);
+        }
+
         if (record != null
                 && logSinkFunction != null
                 && (!logIgnoreDelete || record.row().getRowKind().isAdd())) {
@@ -174,6 +200,9 @@ public class RowDataStoreWriteOperator extends TableWriteOperator<InternalRow> {
 
     @Override
     public void close() throws Exception {
+        if (ingressRate != null) {
+            ingressRate.close();
+        }
         super.close();
 
         if (logSinkFunction != null) {
