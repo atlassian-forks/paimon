@@ -60,6 +60,12 @@ public class BinaryExternalSortBuffer implements SortBuffer {
     private final BlockCompressionFactory compressionCodecFactory;
     private final int compressionBlockSize;
     private final BinaryExternalMerger merger;
+    /**
+     * Best-effort identifier (e.g. "t=<table> p=<partitionString> b=<bucket>") prefixed onto the
+     * "Sort spill" log lines so they can be attributed to a specific Paimon writer / partition /
+     * bucket. Empty string when unknown.
+     */
+    private final String identifier;
 
     private final FileIOChannel.Enumerator enumerator;
     private final List<ChannelWithMeta> spillChannelIDs;
@@ -76,6 +82,28 @@ public class BinaryExternalSortBuffer implements SortBuffer {
             int maxNumFileHandles,
             CompressOptions compression,
             MemorySize maxDiskSize) {
+        this(
+                serializer,
+                comparator,
+                pageSize,
+                inMemorySortBuffer,
+                ioManager,
+                maxNumFileHandles,
+                compression,
+                maxDiskSize,
+                "");
+    }
+
+    public BinaryExternalSortBuffer(
+            BinaryRowSerializer serializer,
+            RecordComparator comparator,
+            int pageSize,
+            BinaryInMemorySortBuffer inMemorySortBuffer,
+            IOManager ioManager,
+            int maxNumFileHandles,
+            CompressOptions compression,
+            MemorySize maxDiskSize,
+            String identifier) {
         this.serializer = serializer;
         this.inMemorySortBuffer = inMemorySortBuffer;
         this.ioManager = ioManager;
@@ -84,6 +112,7 @@ public class BinaryExternalSortBuffer implements SortBuffer {
         this.compressionCodecFactory = BlockCompressionFactory.create(compression);
         this.compressionBlockSize = (int) MemorySize.parse("64 kb").getBytes();
         this.maxDiskSize = maxDiskSize;
+        this.identifier = identifier == null ? "" : identifier;
         this.merger =
                 new BinaryExternalMerger(
                         ioManager,
@@ -93,7 +122,8 @@ public class BinaryExternalSortBuffer implements SortBuffer {
                         serializer.duplicate(),
                         comparator,
                         compressionCodecFactory,
-                        compressionBlockSize);
+                        compressionBlockSize,
+                        this.identifier);
         this.enumerator = ioManager.createChannelEnumerator();
         this.spillChannelIDs = new ArrayList<>();
     }
@@ -266,7 +296,8 @@ public class BinaryExternalSortBuffer implements SortBuffer {
         long inMemRecords = inMemorySortBuffer.size();
         long inMemBytes = inMemorySortBuffer.getOccupancy();
         SPILL_LOG.info(
-                "Sort spill START path={} inMemRecords={} inMemBytes={} priorSpillFiles={}",
+                "[{}] Sort spill START path={} inMemRecords={} inMemBytes={} priorSpillFiles={}",
+                identifier,
                 channel.getPath(),
                 inMemRecords,
                 inMemBytes,
@@ -286,7 +317,8 @@ public class BinaryExternalSortBuffer implements SortBuffer {
                 output.getChannel().deleteChannel();
             }
             SPILL_LOG.warn(
-                    "Sort spill FAILED path={} after elapsedMs={}",
+                    "[{}] Sort spill FAILED path={} after elapsedMs={}",
+                    identifier,
                     channel.getPath(),
                     (System.nanoTime() - t0) / 1_000_000,
                     e);
@@ -296,7 +328,8 @@ public class BinaryExternalSortBuffer implements SortBuffer {
         long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
         long writeBytes = output.getWriteBytes();
         SPILL_LOG.info(
-                "Sort spill END   path={} blocks={} writeBytes={} elapsedMs={} writeMBps={} totalSpillFiles={}",
+                "[{}] Sort spill END   path={} blocks={} writeBytes={} elapsedMs={} writeMBps={} totalSpillFiles={}",
+                identifier,
                 channel.getPath(),
                 blockCount,
                 writeBytes,

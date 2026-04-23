@@ -68,6 +68,13 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
     private final CompressOptions sortCompression;
     private final IOManager ioManager;
 
+    /**
+     * Best-effort identifier (e.g. "t=<table> p=<partitionString> b=<bucket>") prefixed onto every
+     * log line emitted from this writer (and propagated into its sort buffer / merger). Empty
+     * string when unknown / for backward compatibility.
+     */
+    private final String identifier;
+
     private final RowType keyType;
     private final RowType valueType;
     private final CompactManager compactManager;
@@ -105,6 +112,41 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
             ChangelogProducer changelogProducer,
             @Nullable CommitIncrement increment,
             @Nullable FieldsComparator userDefinedSeqComparator) {
+        this(
+                writeBufferSpillable,
+                maxDiskSize,
+                sortMaxFan,
+                sortCompression,
+                ioManager,
+                compactManager,
+                maxSequenceNumber,
+                keyComparator,
+                mergeFunction,
+                writerFactory,
+                commitForceCompact,
+                changelogProducer,
+                increment,
+                userDefinedSeqComparator,
+                "");
+    }
+
+    public MergeTreeWriter(
+            boolean writeBufferSpillable,
+            MemorySize maxDiskSize,
+            int sortMaxFan,
+            CompressOptions sortCompression,
+            IOManager ioManager,
+            CompactManager compactManager,
+            long maxSequenceNumber,
+            Comparator<InternalRow> keyComparator,
+            MergeFunction<KeyValue> mergeFunction,
+            KeyValueFileWriterFactory writerFactory,
+            boolean commitForceCompact,
+            ChangelogProducer changelogProducer,
+            @Nullable CommitIncrement increment,
+            @Nullable FieldsComparator userDefinedSeqComparator,
+            String identifier) {
+        this.identifier = identifier == null ? "" : identifier;
         this.writeBufferSpillable = writeBufferSpillable;
         this.maxDiskSize = maxDiskSize;
         this.sortMaxFan = sortMaxFan;
@@ -162,7 +204,8 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
                         maxDiskSize,
                         sortMaxFan,
                         sortCompression,
-                        ioManager);
+                        ioManager,
+                        identifier);
     }
 
     @Override
@@ -229,7 +272,8 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
             int bufferRecords = writeBuffer.size();
             long bufferBytes = writeBuffer.memoryOccupancy();
             LOG.info(
-                    "MergeTreeWriter flushWriteBuffer START records={} bytes={} waitForCompaction={} forcedFullCompaction={}",
+                    "[{}] MergeTreeWriter flushWriteBuffer START records={} bytes={} waitForCompaction={} forcedFullCompaction={}",
+                    identifier,
                     bufferRecords,
                     bufferBytes,
                     waitForLatestCompaction,
@@ -257,7 +301,8 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
             long totalSize = 0L;
             for (DataFileMeta fileMeta : dataWriter.result()) {
                 LOG.info(
-                        "MergeTreeWriter rolled L0 file name={} level={} rows={} sizeBytes={}",
+                        "[{}] MergeTreeWriter rolled L0 file name={} level={} rows={} sizeBytes={}",
+                        identifier,
                         fileMeta.fileName(),
                         fileMeta.level(),
                         fileMeta.rowCount(),
@@ -270,7 +315,8 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
 
             long elapsedMs = (System.nanoTime() - flushStart) / 1_000_000;
             LOG.info(
-                    "MergeTreeWriter flushWriteBuffer END   files={} totalRows={} totalSizeBytes={} elapsedMs={} writeMBps={}",
+                    "[{}] MergeTreeWriter flushWriteBuffer END   files={} totalRows={} totalSizeBytes={} elapsedMs={} writeMBps={}",
+                    identifier,
                     dataWriter.result().size(),
                     totalRows,
                     totalSize,

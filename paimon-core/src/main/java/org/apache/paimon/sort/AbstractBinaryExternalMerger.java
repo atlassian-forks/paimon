@@ -54,6 +54,13 @@ public abstract class AbstractBinaryExternalMerger<Entry> implements Closeable {
     private final BlockCompressionFactory compressionCodecFactory;
     private final int compressionBlockSize;
 
+    /**
+     * Best-effort identifier (e.g. "t=<table> p=<partitionString> b=<bucket>") used as a prefix on
+     * all log lines so they can be attributed to a particular Paimon writer / partition / bucket
+     * even when several writers share the same TaskManager. Empty string when unknown.
+     */
+    protected final String identifier;
+
     protected final int pageSize;
     protected final IOManager ioManager;
 
@@ -64,12 +71,31 @@ public abstract class AbstractBinaryExternalMerger<Entry> implements Closeable {
             SpillChannelManager channelManager,
             BlockCompressionFactory compressionCodecFactory,
             int compressionBlockSize) {
+        this(
+                ioManager,
+                pageSize,
+                maxFanIn,
+                channelManager,
+                compressionCodecFactory,
+                compressionBlockSize,
+                "");
+    }
+
+    public AbstractBinaryExternalMerger(
+            IOManager ioManager,
+            int pageSize,
+            int maxFanIn,
+            SpillChannelManager channelManager,
+            BlockCompressionFactory compressionCodecFactory,
+            int compressionBlockSize,
+            String identifier) {
         this.ioManager = ioManager;
         this.pageSize = pageSize;
         this.maxFanIn = maxFanIn;
         this.channelManager = channelManager;
         this.compressionCodecFactory = compressionCodecFactory;
         this.compressionBlockSize = compressionBlockSize;
+        this.identifier = identifier == null ? "" : identifier;
     }
 
     @Override
@@ -123,7 +149,8 @@ public abstract class AbstractBinaryExternalMerger<Entry> implements Closeable {
             totalIn += m.getNumBytes();
         }
         LOG.info(
-                "mergeChannelList ROUND start inputChannels={} totalInputBytes={} maxFanIn={}",
+                "[{}] mergeChannelList ROUND start inputChannels={} totalInputBytes={} maxFanIn={}",
+                identifier,
                 channelIDs.size(),
                 totalIn,
                 maxFanIn);
@@ -131,7 +158,8 @@ public abstract class AbstractBinaryExternalMerger<Entry> implements Closeable {
             return mergeChannelListInternal(channelIDs);
         } finally {
             LOG.info(
-                    "mergeChannelList ROUND end   inputChannels={} elapsedMs={}",
+                    "[{}] mergeChannelList ROUND end   inputChannels={} elapsedMs={}",
+                    identifier,
                     channelIDs.size(),
                     (System.nanoTime() - mergeRoundStart) / 1_000_000);
         }
@@ -203,7 +231,8 @@ public abstract class AbstractBinaryExternalMerger<Entry> implements Closeable {
         }
         long t0 = System.nanoTime();
         LOG.info(
-                "External merge START inputChannels={} inputBlocks={} inputBytes~={} -> outputPath={}",
+                "[{}] External merge START inputChannels={} inputBlocks={} inputBytes~={} -> outputPath={}",
+                identifier,
                 channelIDs.size(),
                 inputBlocks,
                 inputBytesEstimate,
@@ -226,7 +255,8 @@ public abstract class AbstractBinaryExternalMerger<Entry> implements Closeable {
                 output.getChannel().deleteChannel();
             }
             LOG.warn(
-                    "External merge FAILED outputPath={} after elapsedMs={}",
+                    "[{}] External merge FAILED outputPath={} after elapsedMs={}",
+                    identifier,
                     mergedChannelID.getPath(),
                     (System.nanoTime() - t0) / 1_000_000,
                     e);
@@ -245,7 +275,8 @@ public abstract class AbstractBinaryExternalMerger<Entry> implements Closeable {
         long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
         long outBytes = output.getWriteBytes();
         LOG.info(
-                "External merge END   inputChannels={} outputPath={} outputBlocks={} outputBytes={} elapsedMs={} writeMBps={}",
+                "[{}] External merge END   inputChannels={} outputPath={} outputBlocks={} outputBytes={} elapsedMs={} writeMBps={}",
+                identifier,
                 channelIDs.size(),
                 mergedChannelID.getPath(),
                 numBlocksWritten,
