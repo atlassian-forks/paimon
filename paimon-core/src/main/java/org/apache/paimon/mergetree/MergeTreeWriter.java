@@ -44,6 +44,7 @@ import org.apache.paimon.utils.RecordWriter;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 import javax.annotation.Nullable;
 
@@ -61,6 +62,14 @@ import java.util.stream.Collectors;
 public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
 
     private static final Logger LOG = LoggerFactory.getLogger(MergeTreeWriter.class);
+
+    /**
+     * SLF4J MDC key under which {@link #identifier} is published while a writer-thread call is in
+     * progress.  Layouts can include it via {@code %X{paimon.id}} so log lines emitted from
+     * downstream code (e.g. {@code BufferFileWriterImpl}, {@code BufferFileReaderImpl}, etc.)
+     * inherit the (table, partition, bucket) context automatically.
+     */
+    public static final String MDC_KEY = "paimon.id";
 
     private final boolean writeBufferSpillable;
     private final MemorySize maxDiskSize;
@@ -187,6 +196,26 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
         return newSequenceNumber++;
     }
 
+    /**
+     * Sets {@value #MDC_KEY} on the current thread's SLF4J MDC and returns a closeable that
+     * restores the previous value.  This is best-effort: if {@code identifier} is empty the MDC is
+     * left untouched.
+     */
+    private AutoCloseable pushMdc() {
+        if (identifier == null || identifier.isEmpty()) {
+            return () -> {};
+        }
+        String previous = MDC.get(MDC_KEY);
+        MDC.put(MDC_KEY, identifier);
+        return () -> {
+            if (previous == null) {
+                MDC.remove(MDC_KEY);
+            } else {
+                MDC.put(MDC_KEY, previous);
+            }
+        };
+    }
+
     @VisibleForTesting
     public CompactManager compactManager() {
         return compactManager;
@@ -194,36 +223,48 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
 
     @Override
     public void setMemoryPool(MemorySegmentPool memoryPool) {
-        this.writeBuffer =
-                new SortBufferWriteBuffer(
-                        keyType,
-                        valueType,
-                        userDefinedSeqComparator,
-                        memoryPool,
-                        writeBufferSpillable,
-                        maxDiskSize,
-                        sortMaxFan,
-                        sortCompression,
-                        ioManager,
-                        identifier);
+        try (AutoCloseable ignored = pushMdc()) {
+            this.writeBuffer =
+                    new SortBufferWriteBuffer(
+                            keyType,
+                            valueType,
+                            userDefinedSeqComparator,
+                            memoryPool,
+                            writeBufferSpillable,
+                            maxDiskSize,
+                            sortMaxFan,
+                            sortCompression,
+                            ioManager,
+                            identifier);
+        } catch (Exception e) {
+            // pushMdc()'s AutoCloseable.close() never throws checked exceptions, so this catch
+            // is purely to satisfy the compiler. Re-throw as RuntimeException so we don't change
+            // the method's declared throws clause.
+            throw new RuntimeException(e);
+        }
     }
 
     @Override
     public void write(KeyValue kv) throws Exception {
-        long sequenceNumber = newSequenceNumber();
-        boolean success = writeBuffer.put(sequenceNumber, kv.valueKind(), kv.key(), kv.value());
-        if (!success) {
-            flushWriteBuffer(false, false);
-            success = writeBuffer.put(sequenceNumber, kv.valueKind(), kv.key(), kv.value());
+        try (AutoCloseable ignored = pushMdc()) {
+            long sequenceNumber = newSequenceNumber();
+            boolean success =
+                    writeBuffer.put(sequenceNumber, kv.valueKind(), kv.key(), kv.value());
             if (!success) {
-                throw new RuntimeException("Mem table is too small to hold a single element.");
+                flushWriteBuffer(false, false);
+                success = writeBuffer.put(sequenceNumber, kv.valueKind(), kv.key(), kv.value());
+                if (!success) {
+                    throw new RuntimeException("Mem table is too small to hold a single element.");
+                }
             }
         }
     }
 
     @Override
     public void compact(boolean fullCompaction) throws Exception {
-        flushWriteBuffer(true, fullCompaction);
+        try (AutoCloseable ignored = pushMdc()) {
+            flushWriteBuffer(true, fullCompaction);
+        }
     }
 
     @Override
@@ -248,9 +289,11 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
 
     @Override
     public void flushMemory() throws Exception {
-        boolean success = writeBuffer.flushMemory();
-        if (!success) {
-            flushWriteBuffer(false, false);
+        try (AutoCloseable ignored = pushMdc()) {
+            boolean success = writeBuffer.flushMemory();
+            if (!success) {
+                flushWriteBuffer(false, false);
+            }
         }
     }
 
@@ -332,20 +375,22 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
 
     @Override
     public CommitIncrement prepareCommit(boolean waitCompaction) throws Exception {
-        flushWriteBuffer(waitCompaction, false);
-        if (commitForceCompact) {
-            waitCompaction = true;
+        try (AutoCloseable ignored = pushMdc()) {
+            flushWriteBuffer(waitCompaction, false);
+            if (commitForceCompact) {
+                waitCompaction = true;
+            }
+            // Decide again whether to wait here.
+            // For example, in the case of repeated failures in writing, it is possible that Level
+            // 0 files were successfully committed, but failed to restart during the compaction
+            // phase, which may result in an increasing number of Level 0 files. This wait can
+            // avoid this situation.
+            if (compactManager.shouldWaitForPreparingCheckpoint()) {
+                waitCompaction = true;
+            }
+            trySyncLatestCompaction(waitCompaction);
+            return drainIncrement();
         }
-        // Decide again whether to wait here.
-        // For example, in the case of repeated failures in writing, it is possible that Level 0
-        // files were successfully committed, but failed to restart during the compaction phase,
-        // which may result in an increasing number of Level 0 files. This wait can avoid this
-        // situation.
-        if (compactManager.shouldWaitForPreparingCheckpoint()) {
-            waitCompaction = true;
-        }
-        trySyncLatestCompaction(waitCompaction);
-        return drainIncrement();
     }
 
     @Override
@@ -356,7 +401,9 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
 
     @Override
     public void sync() throws Exception {
-        trySyncLatestCompaction(true);
+        try (AutoCloseable ignored = pushMdc()) {
+            trySyncLatestCompaction(true);
+        }
     }
 
     private CommitIncrement drainIncrement() {
@@ -423,6 +470,12 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
 
     @Override
     public void close() throws Exception {
+        try (AutoCloseable ignored = pushMdc()) {
+            doClose();
+        }
+    }
+
+    private void doClose() throws Exception {
         // cancel compaction so that it does not block job cancelling
         compactManager.cancelCompaction();
         sync();
