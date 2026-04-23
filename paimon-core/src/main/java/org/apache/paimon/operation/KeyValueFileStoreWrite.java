@@ -212,6 +212,14 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                 createCompactManager(
                         partition, bucket, compactStrategy, compactExecutor, levels, dvMaintainer);
 
+        // Best-effort identifier prefixed onto every log line emitted from this writer.  Lets
+        // operators correlate Paimon-internal "Sort spill", "External merge",
+        // "MergeTreeWriter rolled L0 file" etc. log lines back to a particular
+        // (table, partition, bucket) tuple - particularly useful when a single TaskManager
+        // hosts many writers and the thread name only gives subtask index.
+        String identifier =
+                "t=" + tableName + " p=" + partition.toString() + " b=" + bucket;
+
         return new MergeTreeWriter(
                 options.writeBufferSpillable(),
                 options.writeBufferSpillDiskSize(),
@@ -226,7 +234,8 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                 options.commitForceCompact(),
                 options.changelogProducer(),
                 restoreIncrement,
-                UserDefinedSeqComparator.create(valueType, options));
+                UserDefinedSeqComparator.create(valueType, options),
+                identifier);
     }
 
     private CompactStrategy createCompactStrategy(CoreOptions options) {

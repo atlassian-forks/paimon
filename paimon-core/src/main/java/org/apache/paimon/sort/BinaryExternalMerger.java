@@ -51,13 +51,36 @@ public class BinaryExternalMerger extends AbstractBinaryExternalMerger<BinaryRow
             RecordComparator comparator,
             BlockCompressionFactory compressionCodecFactory,
             int compressionBlockSize) {
+        this(
+                ioManager,
+                pageSize,
+                maxFanIn,
+                channelManager,
+                serializer,
+                comparator,
+                compressionCodecFactory,
+                compressionBlockSize,
+                "");
+    }
+
+    public BinaryExternalMerger(
+            IOManager ioManager,
+            int pageSize,
+            int maxFanIn,
+            SpillChannelManager channelManager,
+            BinaryRowSerializer serializer,
+            RecordComparator comparator,
+            BlockCompressionFactory compressionCodecFactory,
+            int compressionBlockSize,
+            String identifier) {
         super(
                 ioManager,
                 pageSize,
                 maxFanIn,
                 channelManager,
                 compressionCodecFactory,
-                compressionBlockSize);
+                compressionBlockSize,
+                identifier);
         this.serializer = serializer;
         this.comparator = comparator;
     }
@@ -94,7 +117,7 @@ public class BinaryExternalMerger extends AbstractBinaryExternalMerger<BinaryRow
         RateLogger rate =
                 new RateLogger(
                         LoggerFactory.getLogger(BinaryExternalMerger.class),
-                        "merge-records",
+                        "merge-records " + identifier,
                         MERGE_LOG_EVERY_RECORDS);
         try {
             while ((rec = mergeIterator.next(rec)) != null) {
