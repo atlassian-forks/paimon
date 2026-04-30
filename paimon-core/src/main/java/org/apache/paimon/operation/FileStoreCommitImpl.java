@@ -1449,7 +1449,7 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                 Pair<RuntimeException, RuntimeException> conflictException =
                         createConflictException(
                                 "Total buckets of partition "
-                                        + entry.partition()
+                                        + formatPartition(entry.partition())
                                         + " changed from "
                                         + old
                                         + " to "
@@ -1500,7 +1500,13 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                 if (keyComparator.compare(a.maxKey(), b.minKey()) >= 0) {
                     Pair<RuntimeException, RuntimeException> conflictException =
                             createConflictException(
-                                    "LSM conflicts detected! Give up committing. Conflict files are:\n"
+                                    "LSM conflicts detected in partition "
+                                            + formatPartition(a.partition())
+                                            + " bucket "
+                                            + a.bucket()
+                                            + " level "
+                                            + a.level()
+                                            + "! Give up committing. Conflict files are:\n"
                                             + a.identifier().toString(pathFactory)
                                             + "\n"
                                             + b.identifier().toString(pathFactory),
@@ -1629,11 +1635,13 @@ public class FileStoreCommitImpl implements FileStoreCommit {
         String baseEntriesString =
                 "Base entries are:\n"
                         + baseEntries.stream()
-                                .map(Object::toString)
+                                .map(this::formatEntry)
                                 .collect(Collectors.joining("\n"));
         String changesString =
                 "Changes are:\n"
-                        + changes.stream().map(Object::toString).collect(Collectors.joining("\n"));
+                        + changes.stream()
+                                .map(this::formatEntry)
+                                .collect(Collectors.joining("\n"));
 
         RuntimeException fullException =
                 new RuntimeException(
@@ -1655,12 +1663,12 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                     "Base entries are:\n"
                             + baseEntries.subList(0, Math.min(baseEntries.size(), maxEntry))
                                     .stream()
-                                    .map(Object::toString)
+                                    .map(this::formatEntry)
                                     .collect(Collectors.joining("\n"));
             changesString =
                     "Changes are:\n"
                             + changes.subList(0, Math.min(changes.size(), maxEntry)).stream()
-                                    .map(Object::toString)
+                                    .map(this::formatEntry)
                                     .collect(Collectors.joining("\n"));
             simplifiedException =
                     new RuntimeException(
@@ -1680,6 +1688,46 @@ public class FileStoreCommitImpl implements FileStoreCommit {
         } else {
             return Pair.of(fullException, fullException);
         }
+    }
+
+    /**
+     * Render a partition {@link BinaryRow} as a human-readable {@code col1=value1/col2=value2/...}
+     * style string using the table's partition schema. Falls back to the default {@link
+     * BinaryRow#toString()} (which prints the JVM identity hash, e.g. {@code BinaryRow@7406d785})
+     * only when conversion is not possible.
+     *
+     * <p>Used in commit-conflict exceptions so that operators can identify the offending partition
+     * directly from the JobManager log instead of having to dig through the TaskManager log.
+     */
+    private String formatPartition(BinaryRow partition) {
+        if (partition == null) {
+            return "<null>";
+        }
+        try {
+            // partToSimpleString joins partition columns with the separator and truncates the
+            // resulting string to the given character cap (200 chars is plenty for typical
+            // partition keys but small enough to never blow up an exception message).
+            return partToSimpleString(partitionType, partition, "/", 200);
+        } catch (Throwable t) {
+            // Fall back to the default toString() so that a formatting bug never masks the
+            // underlying commit-conflict error.
+            return partition + " (formatPartition failed: " + t.getClass().getSimpleName() + ")";
+        }
+    }
+
+    /**
+     * Render a {@link SimpleFileEntry} for inclusion in the {@code Base entries} / {@code Changes}
+     * sections of a commit-conflict exception, replacing the opaque {@code BinaryRow@<hash>} for
+     * the partition with a readable {@code col=value/...} representation.
+     */
+    private String formatEntry(SimpleFileEntry entry) {
+        if (entry == null) {
+            return "<null>";
+        }
+        // SimpleFileEntry#toString includes "partition=<binaryRow>"; we tack the readable form on
+        // the end rather than mutating the existing format so any downstream log parsers keep
+        // working.
+        return entry + " [partition=" + formatPartition(entry.partition()) + "]";
     }
 
     private void cleanUpNoReuseTmpManifests(
