@@ -80,6 +80,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
@@ -1387,11 +1388,68 @@ public class FileStoreCommitImpl implements FileStoreCommit {
 
     private List<SimpleFileEntry> readAllEntriesFromChangedPartitions(
             Snapshot snapshot, List<BinaryRow> changedPartitions) {
+        long startNanos = System.nanoTime();
         try {
-            return scan.withSnapshot(snapshot)
-                    .withKind(ScanMode.ALL)
-                    .withPartitionFilter(changedPartitions)
-                    .readSimpleEntries();
+            List<SimpleFileEntry> entries =
+                    scan.withSnapshot(snapshot)
+                            .withKind(ScanMode.ALL)
+                            .withPartitionFilter(changedPartitions)
+                            .readSimpleEntries();
+            long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
+            // Diagnostic: log per-partition bucket-count distribution as observed in the BASE
+            // (latest on-disk snapshot). When combined with the equivalent log emitted later
+            // for DELTA inside noConflictsOrFail(), this lets the operator pinpoint whether
+            // an old layout is lingering on disk (BASE has multiple total_buckets values) vs
+            // the new commit attempt is mis-shaped (DELTA has multiple total_buckets values).
+            //
+            // Output is at INFO for the summary and WARN for any partition whose BASE alone
+            // already shows > 1 total_buckets value (which always indicates an on-disk
+            // inconsistency, e.g. an unfinished rescale or a residual file from a prior
+            // failed commit).
+            Map<BinaryRow, Map<Integer, Integer>> perPartition = new HashMap<>();
+            for (SimpleFileEntry e : entries) {
+                if (e.totalBuckets() <= 0) {
+                    continue;
+                }
+                perPartition
+                        .computeIfAbsent(e.partition(), k -> new HashMap<>())
+                        .merge(e.totalBuckets(), 1, Integer::sum);
+            }
+            int divergent = 0;
+            for (Map.Entry<BinaryRow, Map<Integer, Integer>> e : perPartition.entrySet()) {
+                if (e.getValue().size() > 1) {
+                    divergent++;
+                    LOG.warn(
+                            "BASE manifest read: partition {} already contains MULTIPLE "
+                                    + "total_buckets layouts on disk: {} "
+                                    + "(snapshot id={}, scanned {} changed partitions). "
+                                    + "This is a pre-existing on-disk inconsistency that will "
+                                    + "trigger a bucket-count conflict on commit.",
+                            formatPartition(e.getKey()),
+                            e.getValue(),
+                            snapshot.id(),
+                            changedPartitions.size());
+                } else if (LOG.isDebugEnabled()) {
+                    Map.Entry<Integer, Integer> only = e.getValue().entrySet().iterator().next();
+                    LOG.debug(
+                            "BASE manifest read: partition {} -> total_buckets={} "
+                                    + "({} live entries)",
+                            formatPartition(e.getKey()),
+                            only.getKey(),
+                            only.getValue());
+                }
+            }
+            LOG.info(
+                    "BASE manifest read complete: snapshot={}, requested {} changed partitions, "
+                            + "got {} live entries across {} partitions ({} of them divergent). "
+                            + "Read took {} ms.",
+                    snapshot.id(),
+                    changedPartitions.size(),
+                    entries.size(),
+                    perPartition.size(),
+                    divergent,
+                    elapsedMs);
+            return entries;
         } catch (Throwable e) {
             throw new RuntimeException("Cannot read manifest entries from changed partitions.", e);
         }
@@ -1431,13 +1489,98 @@ public class FileStoreCommitImpl implements FileStoreCommit {
         if (commitKind != CommitKind.OVERWRITE) {
             // total buckets within the same partition should remain the same
             Map<BinaryRow, Integer> totalBuckets = new HashMap<>();
+            // Track the origin (BASE vs DELTA) and file name of the *first* entry per partition,
+            // so that when a conflict is detected we can tell the operator exactly where each
+            // side came from. Without this, "Total buckets ... changed from 2 to 32" is opaque:
+            // both numbers could be from on-disk state (corrupt table) or from the new commit
+            // (faulty writer). With it, we know whether to look at the table or at the writer.
+            Map<BinaryRow, String> firstEntryOrigin = new HashMap<>();
+            Map<BinaryRow, String> firstEntryFile = new HashMap<>();
+            int baseSize = baseEntries.size();
+            int idx = 0;
+
+            // Diagnostic log: per-partition distribution of total_buckets values seen in BASE
+            // vs DELTA. This lets the operator see, before the conflict is thrown, whether
+            // base/delta are internally consistent and where any disagreement comes from.
+            // Only emitted at DEBUG level for the global summary, but conflicting partitions
+            // are escalated to WARN below.
+            Map<BinaryRow, Map<String, Set<Integer>>> bucketCountsByPartitionAndOrigin =
+                    new HashMap<>();
+            for (int i = 0; i < baseSize; i++) {
+                SimpleFileEntry e = baseEntries.get(i);
+                if (e.totalBuckets() <= 0) {
+                    continue;
+                }
+                bucketCountsByPartitionAndOrigin
+                        .computeIfAbsent(e.partition(), k -> new HashMap<>())
+                        .computeIfAbsent("BASE", k -> new TreeSet<>())
+                        .add(e.totalBuckets());
+            }
+            for (SimpleFileEntry e : deltaEntries) {
+                if (e.totalBuckets() <= 0) {
+                    continue;
+                }
+                bucketCountsByPartitionAndOrigin
+                        .computeIfAbsent(e.partition(), k -> new HashMap<>())
+                        .computeIfAbsent("DELTA", k -> new TreeSet<>())
+                        .add(e.totalBuckets());
+            }
+            // Always WARN-log any partition whose BASE ∪ DELTA produces more than one
+            // total_buckets value -- those are the partitions that will (or did) cause a
+            // conflict. This output appears regardless of whether the conflict is later
+            // suppressed by retry logic.
+            for (Map.Entry<BinaryRow, Map<String, Set<Integer>>> e :
+                    bucketCountsByPartitionAndOrigin.entrySet()) {
+                Set<Integer> baseValues =
+                        e.getValue().getOrDefault("BASE", Collections.emptySet());
+                Set<Integer> deltaValues =
+                        e.getValue().getOrDefault("DELTA", Collections.emptySet());
+                Set<Integer> union = new TreeSet<>();
+                union.addAll(baseValues);
+                union.addAll(deltaValues);
+                if (union.size() > 1) {
+                    LOG.warn(
+                            "Bucket-count divergence for partition {}: BASE total_buckets={} "
+                                    + "(from latest snapshot, {} entries), "
+                                    + "DELTA total_buckets={} (from this commit, {} entries). "
+                                    + "Union={}.",
+                            formatPartition(e.getKey()),
+                            baseValues,
+                            baseEntries.stream()
+                                    .filter(x -> e.getKey().equals(x.partition()))
+                                    .count(),
+                            deltaValues,
+                            deltaEntries.stream()
+                                    .filter(x -> e.getKey().equals(x.partition()))
+                                    .count(),
+                            union);
+                } else if (LOG.isDebugEnabled()) {
+                    LOG.debug(
+                            "Bucket-count check for partition {}: BASE={} DELTA={} -> OK",
+                            formatPartition(e.getKey()),
+                            baseValues,
+                            deltaValues);
+                }
+            }
+            if (LOG.isInfoEnabled()) {
+                LOG.info(
+                        "Bucket-count summary: {} unique partitions checked across BASE ({} entries)"
+                                + " and DELTA ({} entries). See WARN logs above for any divergences.",
+                        bucketCountsByPartitionAndOrigin.size(),
+                        baseEntries.size(),
+                        deltaEntries.size());
+            }
+
             for (SimpleFileEntry entry : allEntries) {
+                String origin = (idx++ < baseSize) ? "BASE" : "DELTA";
                 if (entry.totalBuckets() <= 0) {
                     continue;
                 }
 
                 if (!totalBuckets.containsKey(entry.partition())) {
                     totalBuckets.put(entry.partition(), entry.totalBuckets());
+                    firstEntryOrigin.put(entry.partition(), origin);
+                    firstEntryFile.put(entry.partition(), formatEntryFileName(entry));
                     continue;
                 }
 
@@ -1446,18 +1589,40 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                     continue;
                 }
 
+                String oldOrigin = firstEntryOrigin.get(entry.partition());
+                String oldFile = firstEntryFile.get(entry.partition());
+                String newFile = formatEntryFileName(entry);
+                String message =
+                        "Total buckets of partition "
+                                + formatPartition(entry.partition())
+                                + " changed from "
+                                + old
+                                + " to "
+                                + entry.totalBuckets()
+                                + " without overwrite. Give up committing."
+                                + "\n  old: total_buckets="
+                                + old
+                                + " origin="
+                                + oldOrigin
+                                + " file="
+                                + oldFile
+                                + "\n  new: total_buckets="
+                                + entry.totalBuckets()
+                                + " origin="
+                                + origin
+                                + " file="
+                                + newFile
+                                + "\n  base entries source: latest on-disk snapshot, manifest"
+                                + " entries for changed partitions"
+                                + "\n  delta entries source: this commit attempt's writer output"
+                                + " (CommitMessage.fileCommittables)";
                 Pair<RuntimeException, RuntimeException> conflictException =
                         createConflictException(
-                                "Total buckets of partition "
-                                        + formatPartition(entry.partition())
-                                        + " changed from "
-                                        + old
-                                        + " to "
-                                        + entry.totalBuckets()
-                                        + " without overwrite. Give up committing.",
+                                message,
                                 baseCommitUser,
                                 baseEntries,
                                 deltaEntries,
+                                entry.partition(),
                                 null);
                 LOG.warn("", conflictException.getLeft());
                 throw conflictException.getRight();
@@ -1513,6 +1678,7 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                                     baseCommitUser,
                                     baseEntries,
                                     deltaEntries,
+                                    a.partition(),
                                     null);
 
                     LOG.warn("", conflictException.getLeft());
@@ -1601,15 +1767,38 @@ public class FileStoreCommitImpl implements FileStoreCommit {
     }
 
     /**
-     * Construct detailed conflict exception. The returned exception is formed of (full exception,
-     * simplified exception), The simplified exception is generated when the entry length is larger
-     * than the max limit.
+     * Backwards-compatible overload: no focus partition known.
+     *
+     * @see #createConflictException(String, String, List, List, BinaryRow, Throwable)
      */
     private Pair<RuntimeException, RuntimeException> createConflictException(
             String message,
             String baseCommitUser,
             List<SimpleFileEntry> baseEntries,
             List<SimpleFileEntry> changes,
+            Throwable cause) {
+        return createConflictException(
+                message, baseCommitUser, baseEntries, changes, null, cause);
+    }
+
+    /**
+     * Construct detailed conflict exception. The returned exception is formed of (full exception,
+     * simplified exception). The simplified exception is generated when the entry length is larger
+     * than the max limit.
+     *
+     * <p>When {@code focusPartition} is non-null, the exception always includes a dedicated section
+     * (<i>focused entries</i>) that lists every base/delta entry whose partition matches the focus
+     * partition, regardless of the 50-entry truncation cap that applies to the global Base/Changes
+     * lists. This guarantees that for the partition that actually triggered the conflict, the
+     * operator sees the full set of competing entries even when the table has thousands of
+     * unrelated entries in the same commit window.
+     */
+    private Pair<RuntimeException, RuntimeException> createConflictException(
+            String message,
+            String baseCommitUser,
+            List<SimpleFileEntry> baseEntries,
+            List<SimpleFileEntry> changes,
+            BinaryRow focusPartition,
             Throwable cause) {
         String possibleCauses =
                 String.join(
@@ -1643,6 +1832,48 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                                 .map(this::formatEntry)
                                 .collect(Collectors.joining("\n"));
 
+        // Always emit a dedicated focused section for the conflicting partition. This is NOT
+        // subject to the 50-entry cap because the focused list is the most useful evidence and
+        // typically very small (one partition's worth of files).
+        String focusedString = "";
+        if (focusPartition != null) {
+            List<SimpleFileEntry> focusedBase =
+                    baseEntries.stream()
+                            .filter(e -> focusPartition.equals(e.partition()))
+                            .collect(Collectors.toList());
+            List<SimpleFileEntry> focusedDelta =
+                    changes.stream()
+                            .filter(e -> focusPartition.equals(e.partition()))
+                            .collect(Collectors.toList());
+            focusedString =
+                    "Focused entries for conflicting partition "
+                            + formatPartition(focusPartition)
+                            + " (no truncation, base count="
+                            + focusedBase.size()
+                            + ", delta count="
+                            + focusedDelta.size()
+                            + "):\n"
+                            + "  -- BASE ("
+                            + focusedBase.size()
+                            + " entries from latest on-disk snapshot) --\n"
+                            + (focusedBase.isEmpty()
+                                    ? "    <none>"
+                                    : focusedBase.stream()
+                                            .map(e -> "    " + formatEntry(e))
+                                            .collect(Collectors.joining("\n")))
+                            + "\n  -- DELTA ("
+                            + focusedDelta.size()
+                            + " entries from this commit attempt) --\n"
+                            + (focusedDelta.isEmpty()
+                                    ? "    <none>"
+                                    : focusedDelta.stream()
+                                            .map(e -> "    " + formatEntry(e))
+                                            .collect(Collectors.joining("\n")));
+        }
+
+        String fullExtras =
+                focusPartition != null ? "\n\n" + focusedString : "";
+
         RuntimeException fullException =
                 new RuntimeException(
                         message
@@ -1650,6 +1881,7 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                                 + possibleCauses
                                 + "\n\n"
                                 + commitUserString
+                                + fullExtras
                                 + "\n\n"
                                 + baseEntriesString
                                 + "\n\n"
@@ -1659,6 +1891,9 @@ public class FileStoreCommitImpl implements FileStoreCommit {
         RuntimeException simplifiedException;
         int maxEntry = 50;
         if (baseEntries.size() > maxEntry || changes.size() > maxEntry) {
+            // Truncation rule: keep the focused entries (always full) at the top, then show up to
+            // `maxEntry` of the global Base/Changes lists. This ensures the partition that
+            // triggered the conflict is never partially shown.
             baseEntriesString =
                     "Base entries are:\n"
                             + baseEntries.subList(0, Math.min(baseEntries.size(), maxEntry))
@@ -1677,16 +1912,36 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                                     + possibleCauses
                                     + "\n\n"
                                     + commitUserString
+                                    + fullExtras
                                     + "\n\n"
                                     + baseEntriesString
                                     + "\n\n"
                                     + changesString
                                     + "\n\n"
-                                    + "The entry list above are not fully displayed, please refer to taskmanager.log for more information.",
+                                    + "The global Base/Changes lists above are truncated to "
+                                    + maxEntry
+                                    + " entries each; the focused-entries section (if present) is"
+                                    + " complete. Refer to taskmanager.log for the full lists.",
                             cause);
             return Pair.of(fullException, simplifiedException);
         } else {
             return Pair.of(fullException, fullException);
+        }
+    }
+
+    /**
+     * Render only the file name of a {@link SimpleFileEntry} (no partition / bucket prefix), used
+     * inside the conflict exception to identify the specific data file that introduced the
+     * conflicting {@code total_buckets} value.
+     */
+    private String formatEntryFileName(SimpleFileEntry entry) {
+        if (entry == null) {
+            return "<unknown>";
+        }
+        try {
+            return entry.fileName();
+        } catch (Throwable t) {
+            return "<formatEntryFileName failed: " + t.getClass().getSimpleName() + ">";
         }
     }
 
