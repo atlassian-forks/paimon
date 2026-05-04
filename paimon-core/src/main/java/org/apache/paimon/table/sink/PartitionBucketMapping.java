@@ -64,12 +64,31 @@ public class PartitionBucketMapping implements Serializable {
     private final Map<BinaryRow, Integer> partitionBucketMap;
 
     /**
+     * Renders a {@link BinaryRow} partition into a human-readable {@code key=value/key=value}
+     * string. Built once at load time from the table's partition schema so that
+     * {@link #resolveNumBuckets(BinaryRow)} doesn't have to repeatedly convert types per record.
+     * May be {@code null} for legacy code paths that constructed this object without schema
+     * info, in which case logging falls back to {@link BinaryRow#toString()}.
+     */
+    private final transient PartitionRenderer partitionRenderer;
+
+    /**
      * Tracks partitions for which we've already emitted the "first resolution" log line in this
      * JVM/instance, so that the per-record {@link #resolveNumBuckets(BinaryRow)} call only logs
      * once per partition, not on every record. Marked {@code transient} so it does not get
      * shipped with the serialized state.
      */
     private transient Set<BinaryRow> firstResolutionLogged;
+
+    /**
+     * Functional interface used to render a partition {@link BinaryRow} as a human-readable
+     * string. Holding a tiny wrapper here (rather than the full converter + key list) lets
+     * unit tests stub the rendering without depending on {@code RowDataToObjectArrayConverter}.
+     */
+    @FunctionalInterface
+    public interface PartitionRenderer extends Serializable {
+        String render(BinaryRow partition);
+    }
 
     /**
      * Creates a mapping with only a default bucket count and no per-partition overrides.
@@ -88,8 +107,22 @@ public class PartitionBucketMapping implements Serializable {
      */
     public PartitionBucketMapping(
             int defaultBucketCount, Map<BinaryRow, Integer> partitionBucketMap) {
+        this(defaultBucketCount, partitionBucketMap, null);
+    }
+
+    /**
+     * Same as {@link #PartitionBucketMapping(int, Map)} but additionally accepts a
+     * {@link PartitionRenderer} used to format partition values in log output. When the renderer
+     * is {@code null}, logging falls back to {@link BinaryRow#toString()} (which prints
+     * {@code BinaryRow@hex}).
+     */
+    public PartitionBucketMapping(
+            int defaultBucketCount,
+            Map<BinaryRow, Integer> partitionBucketMap,
+            PartitionRenderer partitionRenderer) {
         this.defaultBucketCount = defaultBucketCount;
         this.partitionBucketMap = partitionBucketMap;
+        this.partitionRenderer = partitionRenderer;
     }
 
     /**
@@ -170,6 +203,11 @@ public class PartitionBucketMapping implements Serializable {
             RowDataToObjectArrayConverter partitionConverter =
                     new RowDataToObjectArrayConverter(table.schema().logicalPartitionType());
             List<String> partitionKeyNames = table.partitionKeys();
+            // Renderer used by resolveNumBuckets() so per-record logs print "key=value/..."
+            // instead of the opaque BinaryRow@hex form. We pre-bind the converter and key list
+            // here at load time, so the per-record path doesn't have to recreate them.
+            PartitionRenderer renderer =
+                    new ConverterPartitionRenderer(partitionConverter, partitionKeyNames);
 
             // Detect and log divergence (multiple total_buckets values for one partition).
             // For each divergent partition we emit:
@@ -268,7 +306,7 @@ public class PartitionBucketMapping implements Serializable {
                     divergent,
                     elapsedMs);
 
-            return new PartitionBucketMapping(defaultBuckets, partitionBucketMap);
+            return new PartitionBucketMapping(defaultBuckets, partitionBucketMap, renderer);
         } catch (Exception e) {
             long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
             LOG.warn(
@@ -279,6 +317,29 @@ public class PartitionBucketMapping implements Serializable {
                     defaultBuckets,
                     e.toString());
             return new PartitionBucketMapping(defaultBuckets, Collections.emptyMap());
+        }
+    }
+
+    /**
+     * {@link PartitionRenderer} backed by a {@link RowDataToObjectArrayConverter} and the table's
+     * partition key names. Reused for the per-record path in
+     * {@link #resolveNumBuckets(BinaryRow)} so we render at most once per distinct partition.
+     */
+    private static final class ConverterPartitionRenderer implements PartitionRenderer {
+        private static final long serialVersionUID = 1L;
+
+        private final RowDataToObjectArrayConverter converter;
+        private final List<String> partitionKeys;
+
+        ConverterPartitionRenderer(
+                RowDataToObjectArrayConverter converter, List<String> partitionKeys) {
+            this.converter = converter;
+            this.partitionKeys = partitionKeys;
+        }
+
+        @Override
+        public String render(BinaryRow partition) {
+            return renderPartition(partition, converter, partitionKeys);
         }
     }
 
@@ -342,10 +403,21 @@ public class PartitionBucketMapping implements Serializable {
                 }
             }
             if (firstResolutionLogged.add(partition.copy())) {
+                String partitionStr;
+                if (partitionRenderer != null) {
+                    try {
+                        partitionStr = partitionRenderer.render(partition);
+                    } catch (Throwable t) {
+                        partitionStr =
+                                "<render failed: " + t.getClass().getSimpleName() + ">";
+                    }
+                } else {
+                    partitionStr = String.valueOf(partition);
+                }
                 LOG.info(
                         "PartitionBucketMapping.resolveNumBuckets: writer first sees partition {} -> "
                                 + "total_buckets={} (source={}, default={}, override_map_size={})",
-                        partition,
+                        partitionStr,
                         resolved,
                         fromOverride ? "PER_PARTITION_OVERRIDE" : "DEFAULT",
                         defaultBucketCount,
