@@ -425,7 +425,10 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     }
 
     public WriterContainer<T> createWriterContainer(BinaryRow partition, int bucket) {
-        LOG.info("Creating writer for partition {}, bucket {}", partition, bucket);
+        LOG.info(
+                "Creating writer for partition {}, bucket {}",
+                org.apache.paimon.utils.PartitionLogFormatter.format(partitionType, partition),
+                bucket);
 
         if (writerNumber() >= writerNumberMax) {
             try {
