@@ -52,7 +52,7 @@ public class PojoManifestEntry implements ManifestEntry {
         TOTAL_BUCKETS_TRACE_LOG.info(
                 "[CTOR] PojoManifestEntry: kind={}, partition={}, bucket={}, totalBuckets={}, file={}",
                 kind,
-                partition,
+                org.apache.paimon.utils.PartitionLogFormatter.format(partition),
                 bucket,
                 totalBuckets,
                 file == null ? null : file.fileName());

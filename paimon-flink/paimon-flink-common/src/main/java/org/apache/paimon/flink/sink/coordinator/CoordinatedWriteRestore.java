@@ -105,7 +105,7 @@ public class CoordinatedWriteRestore implements WriteRestore {
                     .info(
                             "[COORD_RESTORE] CoordinatedWriteRestore.restoreFiles: partition={}, bucket={}, "
                                     + "response.totalBuckets={}",
-                            partition,
+                            org.apache.paimon.utils.PartitionLogFormatter.format(partition),
                             bucket,
                             response.totalBuckets());
             return new RestoreFiles(

@@ -830,7 +830,8 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                         + "commitMessage.totalBuckets={}, numBucket(fallback)={}, chosenTotalBuckets={}, usedFallback={}",
                 tableName,
                 kind,
-                commitMessage.partition(),
+                org.apache.paimon.utils.PartitionLogFormatter.format(
+                        partitionType, commitMessage.partition()),
                 commitMessage.bucket(),
                 commitMessage.totalBuckets(),
                 numBucket,

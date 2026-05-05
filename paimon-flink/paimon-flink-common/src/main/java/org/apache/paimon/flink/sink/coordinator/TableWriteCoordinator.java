@@ -155,7 +155,7 @@ public class TableWriteCoordinator {
                 .info(
                         "[COORD_SCAN] TableWriteCoordinator.scan: partition={}, bucket={}, "
                                 + "snapshotId={}, numEntries={}, totalBuckets(from manifests)={}",
-                        partition,
+                        org.apache.paimon.utils.PartitionLogFormatter.format(partition),
                         bucket,
                         snapshot == null ? null : snapshot.id(),
                         entries.size(),

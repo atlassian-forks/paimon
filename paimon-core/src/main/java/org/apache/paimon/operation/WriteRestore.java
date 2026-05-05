@@ -57,7 +57,7 @@ public interface WriteRestore {
                     "[EXTRACT] WriteRestore.extractDataFiles: kind={}, partition={}, bucket={}, "
                             + "entry.totalBuckets={}, fileName={}",
                     entry.kind(),
-                    entry.partition(),
+                    org.apache.paimon.utils.PartitionLogFormatter.format(entry.partition()),
                     entry.bucket(),
                     entry.totalBuckets(),
                     entry.fileName());

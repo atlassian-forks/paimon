@@ -197,7 +197,8 @@ public class FileSystemWriteRestore implements WriteRestore {
                 "[RESTORE] FileSystemWriteRestore.restoreFiles: tablePath={}, partition={}, bucket={}, "
                         + "snapshotId={}, numEntries={}, totalBuckets(from manifests)={}",
                 snapshotManager.tablePath(),
-                partition,
+                org.apache.paimon.utils.PartitionLogFormatter.format(
+                        scan.manifestsReader().partitionType(), partition),
                 bucket,
                 snapshot == null ? null : snapshot.id(),
                 entries.size(),

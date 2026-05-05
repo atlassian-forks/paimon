@@ -236,7 +236,8 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                         "[PREP_COMMIT] AbstractFileStoreWrite.prepareCommit: table={}, partition={}, bucket={}, "
                                 + "writerContainer.totalBuckets={} (will be set in CommitMessageImpl)",
                         tableName,
-                        partition,
+                        org.apache.paimon.utils.PartitionLogFormatter.format(
+                                partitionType, partition),
                         bucket,
                         writerContainer.totalBuckets);
                 CommitMessageImpl committable =
@@ -473,7 +474,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                 "[CREATE_WRITER] AbstractFileStoreWrite.createWriterContainer: table={}, partition={}, bucket={}, "
                         + "restored.totalBuckets={}, table-default numBuckets={}, WriterContainer.totalBuckets={}",
                 tableName,
-                partition,
+                org.apache.paimon.utils.PartitionLogFormatter.format(partitionType, partition),
                 bucket,
                 restored.totalBuckets(),
                 numBuckets,
@@ -512,7 +513,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                 "[SCAN] AbstractFileStoreWrite.scanExistingFileMetas: table={}, partition={}, bucket={}, "
                         + "restored.totalBuckets={}, table-default numBuckets={}, chosenTotalBuckets={}",
                 tableName,
-                partition,
+                org.apache.paimon.utils.PartitionLogFormatter.format(partitionType, partition),
                 bucket,
                 restoredTotalBuckets,
                 numBuckets,

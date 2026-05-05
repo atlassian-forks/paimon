@@ -67,7 +67,7 @@ public class CommitMessageImpl implements CommitMessage {
         this.compactIncrement = compactIncrement;
         TOTAL_BUCKETS_TRACE_LOG.info(
                 "[CTOR] CommitMessageImpl: partition={}, bucket={}, totalBuckets={}",
-                partition,
+                org.apache.paimon.utils.PartitionLogFormatter.format(partition),
                 bucket,
                 totalBuckets);
     }

@@ -73,7 +73,7 @@ public class SimpleFileEntry implements FileEntry {
         TOTAL_BUCKETS_TRACE_LOG.info(
                 "[CTOR] SimpleFileEntry: kind={}, partition={}, bucket={}, totalBuckets={}, fileName={}",
                 kind,
-                partition,
+                org.apache.paimon.utils.PartitionLogFormatter.format(partition),
                 bucket,
                 totalBuckets,
                 fileName);
@@ -84,7 +84,7 @@ public class SimpleFileEntry implements FileEntry {
                 "[FROM] SimpleFileEntry.from(ManifestEntry): kind={}, partition={}, bucket={}, "
                         + "entry.totalBuckets={}, fileName={}",
                 entry.kind(),
-                entry.partition(),
+                org.apache.paimon.utils.PartitionLogFormatter.format(entry.partition()),
                 entry.bucket(),
                 entry.totalBuckets(),
                 entry.fileName());
