@@ -50,6 +50,8 @@ import static org.apache.paimon.deletionvectors.DeletionVectorsIndexFile.DELETIO
 public class FileSystemWriteRestore implements WriteRestore {
 
     private static final Logger LOG = LoggerFactory.getLogger(FileSystemWriteRestore.class);
+    private static final Logger TOTAL_BUCKETS_TRACE_LOG =
+            LoggerFactory.getLogger("TOTAL_BUCKETS_TRACE");
 
     private final SnapshotManager snapshotManager;
     private final FileStoreScan scan;
@@ -191,6 +193,15 @@ public class FileSystemWriteRestore implements WriteRestore {
 
         List<DataFileMeta> restoreFiles = new ArrayList<>();
         Integer totalBuckets = WriteRestore.extractDataFiles(entries, restoreFiles);
+        TOTAL_BUCKETS_TRACE_LOG.info(
+                "[RESTORE] FileSystemWriteRestore.restoreFiles: tablePath={}, partition={}, bucket={}, "
+                        + "snapshotId={}, numEntries={}, totalBuckets(from manifests)={}",
+                snapshotManager.tablePath(),
+                partition,
+                bucket,
+                snapshot == null ? null : snapshot.id(),
+                entries.size(),
+                totalBuckets);
 
         IndexFileMeta dynamicBucketIndex = null;
         if (scanDynamicBucketIndex) {

@@ -20,6 +20,9 @@ package org.apache.paimon.manifest;
 
 import org.apache.paimon.data.BinaryRow;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import javax.annotation.Nullable;
 
 import java.util.List;
@@ -28,6 +31,9 @@ import java.util.stream.Collectors;
 
 /** A simple {@link FileEntry} only contains identifier and min max key. */
 public class SimpleFileEntry implements FileEntry {
+
+    private static final Logger TOTAL_BUCKETS_TRACE_LOG =
+            LoggerFactory.getLogger("TOTAL_BUCKETS_TRACE");
 
     private final FileKind kind;
     private final BinaryRow partition;
@@ -64,9 +70,24 @@ public class SimpleFileEntry implements FileEntry {
         this.minKey = minKey;
         this.maxKey = maxKey;
         this.externalPath = externalPath;
+        TOTAL_BUCKETS_TRACE_LOG.info(
+                "[CTOR] SimpleFileEntry: kind={}, partition={}, bucket={}, totalBuckets={}, fileName={}",
+                kind,
+                partition,
+                bucket,
+                totalBuckets,
+                fileName);
     }
 
     public static SimpleFileEntry from(ManifestEntry entry) {
+        TOTAL_BUCKETS_TRACE_LOG.info(
+                "[FROM] SimpleFileEntry.from(ManifestEntry): kind={}, partition={}, bucket={}, "
+                        + "entry.totalBuckets={}, fileName={}",
+                entry.kind(),
+                entry.partition(),
+                entry.bucket(),
+                entry.totalBuckets(),
+                entry.fileName());
         return new SimpleFileEntry(
                 entry.kind(),
                 entry.partition(),

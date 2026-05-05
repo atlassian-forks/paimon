@@ -70,6 +70,8 @@ import static org.apache.paimon.utils.FileStorePathFactory.getPartitionComputer;
 public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
 
     private static final Logger LOG = LoggerFactory.getLogger(AbstractFileStoreWrite.class);
+    private static final Logger TOTAL_BUCKETS_TRACE_LOG =
+            LoggerFactory.getLogger("TOTAL_BUCKETS_TRACE");
 
     private final int writerNumberMax;
     @Nullable private final DynamicBucketIndexMaintainer.Factory dbMaintainerFactory;
@@ -112,6 +114,10 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
         this.partitionType = partitionType;
         this.writers = new HashMap<>();
         this.tableName = tableName;
+        TOTAL_BUCKETS_TRACE_LOG.info(
+                "[CTOR] AbstractFileStoreWrite: table={}, options.bucket()={} (this becomes numBuckets table-default)",
+                tableName,
+                options.bucket());
         this.writerNumberMax = options.writeMaxWritersToSpill();
         this.legacyPartitionName = options.legacyPartitionName();
     }
@@ -226,6 +232,13 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                             .getOrCompute()
                             .ifPresent(compactIncrement.newIndexFiles()::add);
                 }
+                TOTAL_BUCKETS_TRACE_LOG.info(
+                        "[PREP_COMMIT] AbstractFileStoreWrite.prepareCommit: table={}, partition={}, bucket={}, "
+                                + "writerContainer.totalBuckets={} (will be set in CommitMessageImpl)",
+                        tableName,
+                        partition,
+                        bucket,
+                        writerContainer.totalBuckets);
                 CommitMessageImpl committable =
                         new CommitMessageImpl(
                                 partition,
@@ -413,9 +426,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     }
 
     public WriterContainer<T> createWriterContainer(BinaryRow partition, int bucket) {
-        if (LOG.isDebugEnabled()) {
-            LOG.debug("Creating writer for partition {}, bucket {}", partition, bucket);
-        }
+        LOG.info("Creating writer for partition {}, bucket {}", partition, bucket);
 
         if (writerNumber() >= writerNumberMax) {
             try {
@@ -457,9 +468,19 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
         notifyNewWriter(writer);
 
         Snapshot previousSnapshot = restored.snapshot();
+        int chosenTotalBuckets = firstNonNull(restored.totalBuckets(), numBuckets);
+        TOTAL_BUCKETS_TRACE_LOG.info(
+                "[CREATE_WRITER] AbstractFileStoreWrite.createWriterContainer: table={}, partition={}, bucket={}, "
+                        + "restored.totalBuckets={}, table-default numBuckets={}, WriterContainer.totalBuckets={}",
+                tableName,
+                partition,
+                bucket,
+                restored.totalBuckets(),
+                numBuckets,
+                chosenTotalBuckets);
         return new WriterContainer<>(
                 writer,
-                firstNonNull(restored.totalBuckets(), numBuckets),
+                chosenTotalBuckets,
                 indexMaintainer,
                 dvMaintainer,
                 previousSnapshot == null ? null : previousSnapshot.id());
@@ -487,6 +508,15 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
         if (restoredTotalBuckets != null) {
             totalBuckets = restoredTotalBuckets;
         }
+        TOTAL_BUCKETS_TRACE_LOG.info(
+                "[SCAN] AbstractFileStoreWrite.scanExistingFileMetas: table={}, partition={}, bucket={}, "
+                        + "restored.totalBuckets={}, table-default numBuckets={}, chosenTotalBuckets={}",
+                tableName,
+                partition,
+                bucket,
+                restoredTotalBuckets,
+                numBuckets,
+                totalBuckets);
         if (!ignoreNumBucketCheck && totalBuckets != numBuckets) {
             if (partitionType.getFieldCount() > 0) {
                 // For partitioned tables, allow per-partition bucket counts.

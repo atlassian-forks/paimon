@@ -122,6 +122,8 @@ import static org.apache.paimon.utils.Preconditions.checkState;
 public class FileStoreCommitImpl implements FileStoreCommit {
 
     private static final Logger LOG = LoggerFactory.getLogger(FileStoreCommitImpl.class);
+    private static final Logger TOTAL_BUCKETS_TRACE_LOG =
+            LoggerFactory.getLogger("TOTAL_BUCKETS_TRACE");
 
     private final SnapshotCommit snapshotCommit;
     private final FileIO fileIO;
@@ -215,6 +217,11 @@ public class FileStoreCommitImpl implements FileStoreCommit {
             this.scan.dropStats();
         }
         this.numBucket = numBucket;
+        TOTAL_BUCKETS_TRACE_LOG.info(
+                "[CTOR] FileStoreCommitImpl: table={}, commitUser={}, numBucket(fallback)={}",
+                tableName,
+                commitUser,
+                numBucket);
         this.manifestTargetSize = manifestTargetSize;
         this.manifestFullCompactionSize = manifestFullCompactionSize;
         this.manifestMergeMinCount = manifestMergeMinCount;
@@ -813,9 +820,22 @@ public class FileStoreCommitImpl implements FileStoreCommit {
 
     private ManifestEntry makeEntry(FileKind kind, CommitMessage commitMessage, DataFileMeta file) {
         Integer totalBuckets = commitMessage.totalBuckets();
+        boolean fellBack = false;
         if (totalBuckets == null) {
             totalBuckets = numBucket;
+            fellBack = true;
         }
+        TOTAL_BUCKETS_TRACE_LOG.info(
+                "[MAKE_ENTRY] FileStoreCommitImpl.makeEntry: table={}, kind={}, partition={}, bucket={}, "
+                        + "commitMessage.totalBuckets={}, numBucket(fallback)={}, chosenTotalBuckets={}, usedFallback={}",
+                tableName,
+                kind,
+                commitMessage.partition(),
+                commitMessage.bucket(),
+                commitMessage.totalBuckets(),
+                numBucket,
+                totalBuckets,
+                fellBack);
 
         return ManifestEntry.create(
                 kind, commitMessage.partition(), commitMessage.bucket(), totalBuckets, file);

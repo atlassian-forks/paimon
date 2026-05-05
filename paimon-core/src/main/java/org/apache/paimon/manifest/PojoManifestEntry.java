@@ -21,6 +21,9 @@ package org.apache.paimon.manifest;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.io.DataFileMeta;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import javax.annotation.Nullable;
 
 import java.util.List;
@@ -28,6 +31,9 @@ import java.util.Objects;
 
 /** A {@link ManifestEntry} using pojo objects. */
 public class PojoManifestEntry implements ManifestEntry {
+
+    private static final Logger TOTAL_BUCKETS_TRACE_LOG =
+            LoggerFactory.getLogger("TOTAL_BUCKETS_TRACE");
 
     private final FileKind kind;
     // for tables without partition this field should be a row with 0 columns (not null)
@@ -43,6 +49,13 @@ public class PojoManifestEntry implements ManifestEntry {
         this.bucket = bucket;
         this.totalBuckets = totalBuckets;
         this.file = file;
+        TOTAL_BUCKETS_TRACE_LOG.info(
+                "[CTOR] PojoManifestEntry: kind={}, partition={}, bucket={}, totalBuckets={}, file={}",
+                kind,
+                partition,
+                bucket,
+                totalBuckets,
+                file == null ? null : file.fileName());
     }
 
     @Override

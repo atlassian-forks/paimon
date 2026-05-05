@@ -22,12 +22,18 @@ import org.apache.paimon.Snapshot;
 import org.apache.paimon.index.IndexFileMeta;
 import org.apache.paimon.io.DataFileMeta;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import javax.annotation.Nullable;
 
 import java.util.List;
 
 /** Restored files with snapshot and total buckets. */
 public class RestoreFiles {
+
+    private static final Logger TOTAL_BUCKETS_TRACE_LOG =
+            LoggerFactory.getLogger("TOTAL_BUCKETS_TRACE");
 
     private final @Nullable Snapshot snapshot;
     private final @Nullable Integer totalBuckets;
@@ -46,6 +52,11 @@ public class RestoreFiles {
         this.dataFiles = dataFiles;
         this.dynamicBucketIndex = dynamicBucketIndex;
         this.deleteVectorsIndex = deleteVectorsIndex;
+        TOTAL_BUCKETS_TRACE_LOG.info(
+                "[CTOR] RestoreFiles: snapshotId={}, totalBuckets={}, numDataFiles={}",
+                snapshot == null ? null : snapshot.id(),
+                totalBuckets,
+                dataFiles == null ? 0 : dataFiles.size());
     }
 
     @Nullable
