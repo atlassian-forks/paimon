@@ -38,8 +38,7 @@ public class ManifestEntrySerializer extends VersionedObjectSerializer<ManifestE
 
     private static final long serialVersionUID = 1L;
 
-    private static final Logger TOTAL_BUCKETS_TRACE_LOG =
-            LoggerFactory.getLogger("TOTAL_BUCKETS_TRACE");
+    private static final Logger LOG = LoggerFactory.getLogger(ManifestEntrySerializer.class);
 
     private final DataFileMetaSerializer dataFileMetaSerializer;
 
@@ -79,7 +78,7 @@ public class ManifestEntrySerializer extends VersionedObjectSerializer<ManifestE
         BinaryRow partition = deserializeBinaryRow(row.getBinary(1));
         int bucket = row.getInt(2);
         int totalBuckets = row.getInt(3);
-        TOTAL_BUCKETS_TRACE_LOG.info(
+        LOG.info(
                 "[DESER] ManifestEntrySerializer.convertFrom: kind={}, partition={}, bucket={}, "
                         + "totalBuckets(read from manifest row col 3)={}",
                 kind,

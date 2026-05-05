@@ -151,7 +151,7 @@ public class TableWriteCoordinator {
         List<DataFileMeta> restoreFiles = new ArrayList<>();
         List<ManifestEntry> entries = scan.withPartitionBucket(partition, bucket).plan().files();
         Integer totalBuckets = WriteRestore.extractDataFiles(entries, restoreFiles);
-        org.slf4j.LoggerFactory.getLogger("TOTAL_BUCKETS_TRACE")
+        org.slf4j.LoggerFactory.getLogger(TableWriteCoordinator.class)
                 .info(
                         "[COORD_SCAN] TableWriteCoordinator.scan: partition={}, bucket={}, "
                                 + "snapshotId={}, numEntries={}, totalBuckets(from manifests)={}",

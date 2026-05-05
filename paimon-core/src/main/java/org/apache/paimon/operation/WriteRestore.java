@@ -32,7 +32,7 @@ import java.util.List;
 /** Restore for write to restore data files by partition and bucket from file system. */
 public interface WriteRestore {
 
-    Logger TOTAL_BUCKETS_TRACE_LOG = LoggerFactory.getLogger("TOTAL_BUCKETS_TRACE");
+    Logger LOG = LoggerFactory.getLogger(WriteRestore.class);
 
     long latestCommittedIdentifier(String user);
 
@@ -53,7 +53,7 @@ public interface WriteRestore {
                                 totalBuckets, entry.totalBuckets()));
             }
             totalBuckets = entry.totalBuckets();
-            TOTAL_BUCKETS_TRACE_LOG.info(
+            LOG.info(
                     "[EXTRACT] WriteRestore.extractDataFiles: kind={}, partition={}, bucket={}, "
                             + "entry.totalBuckets={}, fileName={}",
                     entry.kind(),
@@ -63,7 +63,7 @@ public interface WriteRestore {
                     entry.fileName());
             dataFiles.add(entry.file());
         }
-        TOTAL_BUCKETS_TRACE_LOG.info(
+        LOG.info(
                 "[EXTRACT_DONE] WriteRestore.extractDataFiles: numEntries={}, "
                         + "computed totalBuckets={} (null if no entries)",
                 entries.size(),

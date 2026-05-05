@@ -32,8 +32,7 @@ import java.util.List;
 /** Restored files with snapshot and total buckets. */
 public class RestoreFiles {
 
-    private static final Logger TOTAL_BUCKETS_TRACE_LOG =
-            LoggerFactory.getLogger("TOTAL_BUCKETS_TRACE");
+    private static final Logger LOG = LoggerFactory.getLogger(RestoreFiles.class);
 
     private final @Nullable Snapshot snapshot;
     private final @Nullable Integer totalBuckets;
@@ -52,7 +51,7 @@ public class RestoreFiles {
         this.dataFiles = dataFiles;
         this.dynamicBucketIndex = dynamicBucketIndex;
         this.deleteVectorsIndex = deleteVectorsIndex;
-        TOTAL_BUCKETS_TRACE_LOG.info(
+        LOG.info(
                 "[CTOR] RestoreFiles: snapshotId={}, totalBuckets={}, numDataFiles={}",
                 snapshot == null ? null : snapshot.id(),
                 totalBuckets,

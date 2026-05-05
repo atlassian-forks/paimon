@@ -89,8 +89,7 @@ import static org.apache.paimon.utils.Preconditions.checkArgument;
  */
 abstract class AbstractFileStore<T> implements FileStore<T> {
 
-    private static final Logger TOTAL_BUCKETS_TRACE_LOG =
-            LoggerFactory.getLogger("TOTAL_BUCKETS_TRACE");
+    private static final Logger LOG = LoggerFactory.getLogger(AbstractFileStore.class);
 
     protected final FileIO fileIO;
     protected final SchemaManager schemaManager;
@@ -273,7 +272,7 @@ abstract class AbstractFileStore<T> implements FileStore<T> {
         if (snapshotCommit == null) {
             snapshotCommit = new RenamingSnapshotCommit(snapshotManager, Lock.empty());
         }
-        TOTAL_BUCKETS_TRACE_LOG.info(
+        LOG.info(
                 "[ROOT] AbstractFileStore.newCommit: table={}, commitUser={}, options.bucket()={} (this becomes FileStoreCommitImpl.numBucket fallback)",
                 tableName,
                 commitUser,

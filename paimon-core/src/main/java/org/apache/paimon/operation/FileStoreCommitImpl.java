@@ -122,8 +122,6 @@ import static org.apache.paimon.utils.Preconditions.checkState;
 public class FileStoreCommitImpl implements FileStoreCommit {
 
     private static final Logger LOG = LoggerFactory.getLogger(FileStoreCommitImpl.class);
-    private static final Logger TOTAL_BUCKETS_TRACE_LOG =
-            LoggerFactory.getLogger("TOTAL_BUCKETS_TRACE");
 
     private final SnapshotCommit snapshotCommit;
     private final FileIO fileIO;
@@ -217,7 +215,7 @@ public class FileStoreCommitImpl implements FileStoreCommit {
             this.scan.dropStats();
         }
         this.numBucket = numBucket;
-        TOTAL_BUCKETS_TRACE_LOG.info(
+        LOG.info(
                 "[CTOR] FileStoreCommitImpl: table={}, commitUser={}, numBucket(fallback)={}",
                 tableName,
                 commitUser,
@@ -825,7 +823,7 @@ public class FileStoreCommitImpl implements FileStoreCommit {
             totalBuckets = numBucket;
             fellBack = true;
         }
-        TOTAL_BUCKETS_TRACE_LOG.info(
+        LOG.info(
                 "[MAKE_ENTRY] FileStoreCommitImpl.makeEntry: table={}, kind={}, partition={}, bucket={}, "
                         + "commitMessage.totalBuckets={}, numBucket(fallback)={}, chosenTotalBuckets={}, usedFallback={}",
                 tableName,

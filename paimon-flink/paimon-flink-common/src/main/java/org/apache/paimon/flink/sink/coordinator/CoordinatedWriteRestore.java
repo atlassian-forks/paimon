@@ -101,7 +101,7 @@ public class CoordinatedWriteRestore implements WriteRestore {
             ScanCoordinationResponse response =
                     InstantiationUtil.deserializeObject(
                             responseContent, getClass().getClassLoader());
-            org.slf4j.LoggerFactory.getLogger("TOTAL_BUCKETS_TRACE")
+            org.slf4j.LoggerFactory.getLogger(CoordinatedWriteRestore.class)
                     .info(
                             "[COORD_RESTORE] CoordinatedWriteRestore.restoreFiles: partition={}, bucket={}, "
                                     + "response.totalBuckets={}",

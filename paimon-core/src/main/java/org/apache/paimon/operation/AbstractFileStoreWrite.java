@@ -70,8 +70,6 @@ import static org.apache.paimon.utils.FileStorePathFactory.getPartitionComputer;
 public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
 
     private static final Logger LOG = LoggerFactory.getLogger(AbstractFileStoreWrite.class);
-    private static final Logger TOTAL_BUCKETS_TRACE_LOG =
-            LoggerFactory.getLogger("TOTAL_BUCKETS_TRACE");
 
     private final int writerNumberMax;
     @Nullable private final DynamicBucketIndexMaintainer.Factory dbMaintainerFactory;
@@ -114,7 +112,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
         this.partitionType = partitionType;
         this.writers = new HashMap<>();
         this.tableName = tableName;
-        TOTAL_BUCKETS_TRACE_LOG.info(
+        LOG.info(
                 "[CTOR] AbstractFileStoreWrite: table={}, options.bucket()={} (this becomes numBuckets table-default)",
                 tableName,
                 options.bucket());
@@ -232,7 +230,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                             .getOrCompute()
                             .ifPresent(compactIncrement.newIndexFiles()::add);
                 }
-                TOTAL_BUCKETS_TRACE_LOG.info(
+                LOG.info(
                         "[PREP_COMMIT] AbstractFileStoreWrite.prepareCommit: table={}, partition={}, bucket={}, "
                                 + "writerContainer.totalBuckets={} (will be set in CommitMessageImpl)",
                         tableName,
@@ -470,7 +468,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
 
         Snapshot previousSnapshot = restored.snapshot();
         int chosenTotalBuckets = firstNonNull(restored.totalBuckets(), numBuckets);
-        TOTAL_BUCKETS_TRACE_LOG.info(
+        LOG.info(
                 "[CREATE_WRITER] AbstractFileStoreWrite.createWriterContainer: table={}, partition={}, bucket={}, "
                         + "restored.totalBuckets={}, table-default numBuckets={}, WriterContainer.totalBuckets={}",
                 tableName,
@@ -509,7 +507,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
         if (restoredTotalBuckets != null) {
             totalBuckets = restoredTotalBuckets;
         }
-        TOTAL_BUCKETS_TRACE_LOG.info(
+        LOG.info(
                 "[SCAN] AbstractFileStoreWrite.scanExistingFileMetas: table={}, partition={}, bucket={}, "
                         + "restored.totalBuckets={}, table-default numBuckets={}, chosenTotalBuckets={}",
                 tableName,

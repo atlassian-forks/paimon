@@ -32,8 +32,7 @@ import java.util.stream.Collectors;
 /** A simple {@link FileEntry} only contains identifier and min max key. */
 public class SimpleFileEntry implements FileEntry {
 
-    private static final Logger TOTAL_BUCKETS_TRACE_LOG =
-            LoggerFactory.getLogger("TOTAL_BUCKETS_TRACE");
+    private static final Logger LOG = LoggerFactory.getLogger(SimpleFileEntry.class);
 
     private final FileKind kind;
     private final BinaryRow partition;
@@ -70,7 +69,7 @@ public class SimpleFileEntry implements FileEntry {
         this.minKey = minKey;
         this.maxKey = maxKey;
         this.externalPath = externalPath;
-        TOTAL_BUCKETS_TRACE_LOG.info(
+        LOG.info(
                 "[CTOR] SimpleFileEntry: kind={}, partition={}, bucket={}, totalBuckets={}, fileName={}",
                 kind,
                 org.apache.paimon.utils.PartitionLogFormatter.format(partition),
@@ -80,7 +79,7 @@ public class SimpleFileEntry implements FileEntry {
     }
 
     public static SimpleFileEntry from(ManifestEntry entry) {
-        TOTAL_BUCKETS_TRACE_LOG.info(
+        LOG.info(
                 "[FROM] SimpleFileEntry.from(ManifestEntry): kind={}, partition={}, bucket={}, "
                         + "entry.totalBuckets={}, fileName={}",
                 entry.kind(),

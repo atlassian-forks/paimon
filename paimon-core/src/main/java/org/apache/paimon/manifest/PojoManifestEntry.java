@@ -32,8 +32,7 @@ import java.util.Objects;
 /** A {@link ManifestEntry} using pojo objects. */
 public class PojoManifestEntry implements ManifestEntry {
 
-    private static final Logger TOTAL_BUCKETS_TRACE_LOG =
-            LoggerFactory.getLogger("TOTAL_BUCKETS_TRACE");
+    private static final Logger LOG = LoggerFactory.getLogger(PojoManifestEntry.class);
 
     private final FileKind kind;
     // for tables without partition this field should be a row with 0 columns (not null)
@@ -49,7 +48,7 @@ public class PojoManifestEntry implements ManifestEntry {
         this.bucket = bucket;
         this.totalBuckets = totalBuckets;
         this.file = file;
-        TOTAL_BUCKETS_TRACE_LOG.info(
+        LOG.info(
                 "[CTOR] PojoManifestEntry: kind={}, partition={}, bucket={}, totalBuckets={}, file={}",
                 kind,
                 org.apache.paimon.utils.PartitionLogFormatter.format(partition),

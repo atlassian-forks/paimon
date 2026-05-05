@@ -42,8 +42,7 @@ public class CommitMessageImpl implements CommitMessage {
 
     private static final long serialVersionUID = 1L;
 
-    private static final Logger TOTAL_BUCKETS_TRACE_LOG =
-            LoggerFactory.getLogger("TOTAL_BUCKETS_TRACE");
+    private static final Logger LOG = LoggerFactory.getLogger(CommitMessageImpl.class);
 
     private static final ThreadLocal<CommitMessageSerializer> CACHE =
             ThreadLocal.withInitial(CommitMessageSerializer::new);
@@ -65,7 +64,7 @@ public class CommitMessageImpl implements CommitMessage {
         this.totalBuckets = totalBuckets;
         this.dataIncrement = dataIncrement;
         this.compactIncrement = compactIncrement;
-        TOTAL_BUCKETS_TRACE_LOG.info(
+        LOG.info(
                 "[CTOR] CommitMessageImpl: partition={}, bucket={}, totalBuckets={}",
                 org.apache.paimon.utils.PartitionLogFormatter.format(partition),
                 bucket,
