@@ -42,7 +42,6 @@ import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.streaming.util.functions.StreamingFunctionUtils;
-
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 
@@ -76,10 +75,10 @@ public class RowDataStoreWriteOperator extends TableWriteOperator<InternalRow> {
 
     /**
      * SLF4J MDC key under which the Flink subtask label (e.g. {@code "211/512"}) is published for
-     * the lifetime of this operator on its task thread.  Layouts can include {@code
-     * %X{paimon.subtask}} so that every log line emitted on the writer thread (including those
-     * from Paimon-internal classes that don't have a Flink handle, e.g. {@code
-     * BufferFileWriterImpl}) inherits the subtask context.
+     * the lifetime of this operator on its task thread. Layouts can include {@code
+     * %X{paimon.subtask}} so that every log line emitted on the writer thread (including those from
+     * Paimon-internal classes that don't have a Flink handle, e.g. {@code BufferFileWriterImpl})
+     * inherits the subtask context.
      *
      * <p>Complements {@code paimon.id} (set by {@code MergeTreeWriter}) which carries the (table,
      * partition, bucket) tuple - bucket is a Paimon concept and is generally distinct from the

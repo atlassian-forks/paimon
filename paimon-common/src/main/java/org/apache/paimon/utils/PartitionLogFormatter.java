@@ -63,22 +63,18 @@ public final class PartitionLogFormatter {
                     sb.append("null");
                 } else {
                     DataType type = partitionType.getTypeAt(i);
-                    Object v =
-                            InternalRow.createFieldGetter(type, i).getFieldOrNull(partition);
+                    Object v = InternalRow.createFieldGetter(type, i).getFieldOrNull(partition);
                     sb.append(v);
                 }
             }
             sb.append('}');
             return sb.toString();
         } catch (Throwable t) {
-            return "<typedFormatFailed: " + t.getClass().getSimpleName() + ">"
-                    + format(partition);
+            return "<typedFormatFailed: " + t.getClass().getSimpleName() + ">" + format(partition);
         }
     }
 
-    /**
-     * Untyped best-effort formatter. Tries STRING/INT/LONG for each field. Always safe to call.
-     */
+    /** Untyped best-effort formatter. Tries STRING/INT/LONG for each field. Always safe to call. */
     public static String format(@Nullable BinaryRow partition) {
         if (partition == null) {
             return "null";

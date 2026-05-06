@@ -65,7 +65,7 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
 
     /**
      * SLF4J MDC key under which {@link #identifier} is published while a writer-thread call is in
-     * progress.  Layouts can include it via {@code %X{paimon.id}} so log lines emitted from
+     * progress. Layouts can include it via {@code %X{paimon.id}} so log lines emitted from
      * downstream code (e.g. {@code BufferFileWriterImpl}, {@code BufferFileReaderImpl}, etc.)
      * inherit the (table, partition, bucket) context automatically.
      */
@@ -198,7 +198,7 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
 
     /**
      * Sets {@value #MDC_KEY} on the current thread's SLF4J MDC and returns a closeable that
-     * restores the previous value.  This is best-effort: if {@code identifier} is empty the MDC is
+     * restores the previous value. This is best-effort: if {@code identifier} is empty the MDC is
      * left untouched.
      */
     private AutoCloseable pushMdc() {
@@ -248,8 +248,7 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
     public void write(KeyValue kv) throws Exception {
         try (AutoCloseable ignored = pushMdc()) {
             long sequenceNumber = newSequenceNumber();
-            boolean success =
-                    writeBuffer.put(sequenceNumber, kv.valueKind(), kv.key(), kv.value());
+            boolean success = writeBuffer.put(sequenceNumber, kv.valueKind(), kv.key(), kv.value());
             if (!success) {
                 flushWriteBuffer(false, false);
                 success = writeBuffer.put(sequenceNumber, kv.valueKind(), kv.key(), kv.value());

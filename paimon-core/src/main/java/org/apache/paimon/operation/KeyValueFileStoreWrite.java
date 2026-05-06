@@ -218,7 +218,12 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
         // (table, partition, bucket) tuple - particularly useful when a single TaskManager
         // hosts many writers and the thread name only gives subtask index.
         String identifier =
-                "t=" + tableName + " p=" + formatPartition(partitionType, partition) + " b=" + bucket;
+                "t="
+                        + tableName
+                        + " p="
+                        + formatPartition(partitionType, partition)
+                        + " b="
+                        + bucket;
 
         return new MergeTreeWriter(
                 options.writeBufferSpillable(),
@@ -455,9 +460,9 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
     }
 
     /**
-     * Render a {@link BinaryRow} partition as a self-describing string of the form
-     * {@code {field1=value1, field2=value2}} for use in log identifiers.  Falls back to a safe
-     * placeholder on any error so a malformed partition can never break a writer.
+     * Render a {@link BinaryRow} partition as a self-describing string of the form {@code
+     * {field1=value1, field2=value2}} for use in log identifiers. Falls back to a safe placeholder
+     * on any error so a malformed partition can never break a writer.
      */
     private static String formatPartition(RowType partitionType, BinaryRow partition) {
         if (partitionType == null || partition == null || partitionType.getFieldCount() == 0) {
