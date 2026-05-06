@@ -303,6 +303,100 @@ public class RescaleBucketITCase extends CatalogITCaseBase {
         }
     }
 
+    @Test
+    public void testWriteToEmptyBucketAfterRescaleKeepsPartitionBucketCount() throws Exception {
+        // End-to-end reproduction of the FileSystemWriteRestore empty-bucket bug.
+        //
+        // The bug occurs when a partition has a bucket count that differs from
+        // the table-level default, AND at least one of that partition's buckets
+        // has NO existing data files. A subsequent write that lands in the
+        // empty bucket must keep the partition's bucket count, not silently
+        // adopt the table default.
+        //
+        // Final state we want before the bug-triggering write (Step 5):
+        //   - table default bucket : 2
+        //   - partition p1 bucket  : 4 (held over from a prior rescale+overwrite)
+        //   - partition p1 bucket=X: has data files, totalBuckets = 4
+        //   - partition p1 bucket=Y: NO data files
+        //
+        // The Step 5 write fills bucket=Y in p1. Post-fix, the new file MUST
+        // be stamped totalBuckets=4. Before the fix, FileSystemWriteRestore
+        // returned null for the empty bucket, the writer fell back to the
+        // table default (2), and the new file was stamped totalBuckets=2,
+        // corrupting p1's bucket layout.
+
+        // Step 1: create a partitioned PK table with bucket=2 and seed one row
+        // into p1.
+        batchSql(
+                "CREATE TABLE IF NOT EXISTS `fs_catalog`.`default`.`TPE` "
+                        + "(dt STRING, f0 INT, PRIMARY KEY (dt, f0) NOT ENFORCED) "
+                        + "PARTITIONED BY (dt) "
+                        + "WITH ('bucket' = '2')");
+        batchSql("USE CATALOG fs_catalog");
+        batchSql("INSERT INTO TPE VALUES ('p1', 1)");
+
+        // Step 2: rescale the table default to 4.
+        batchSql(alterTableSql, "TPE", 4);
+
+        // Step 3: INSERT OVERWRITE p1 — this rewrites p1's files using the
+        // current table default (4), so afterwards p1's files are stamped
+        // totalBuckets=4. With only a single row in p1, at least one of p1's
+        // four buckets is guaranteed to be empty.
+        batchSql("INSERT OVERWRITE TPE PARTITION (dt = 'p1') SELECT f0 FROM TPE WHERE dt = 'p1'");
+
+        // Step 4 (NEW): rescale the table default BACK to 2, while p1 keeps
+        // its 4-bucket layout. Now the per-partition bucket count (4) diverges
+        // from the table default (2) — the precondition for the bug.
+        batchSql(alterTableSql, "TPE", 2);
+
+        // Step 5: insert more rows into p1. PartitionBucketMapping reads the
+        // manifest and routes these rows using p1's actual bucket count (4).
+        // Several rows are inserted so that — with high probability — at
+        // least one lands in the bucket that was previously empty, exercising
+        // the FileSystemWriteRestore empty-bucket code path.
+        batchSql("INSERT INTO TPE VALUES ('p1', 2), ('p1', 3), ('p1', 4), ('p1', 5), ('p1', 6)");
+
+        // Sanity check: each PK appears exactly once. Duplicates would indicate
+        // that the new rows landed in an inconsistent bucket layout (e.g. some
+        // files stamped totalBuckets=2 and others stamped totalBuckets=4),
+        // causing the LSM reader to find the same PK in two different buckets.
+        assertThat(batchSql("SELECT * FROM TPE WHERE dt = 'p1'"))
+                .as(
+                        "Each PK in p1 must appear exactly once. Duplicates indicate "
+                                + "rows landed in inconsistent bucket layouts within p1.")
+                .containsExactlyInAnyOrder(
+                        Row.of("p1", 1),
+                        Row.of("p1", 2),
+                        Row.of("p1", 3),
+                        Row.of("p1", 4),
+                        Row.of("p1", 5),
+                        Row.of("p1", 6));
+
+        // Strong assertion: every file in p1 must be stamped totalBuckets=4
+        // (the partition's actual bucket count), NOT 2 (the new table
+        // default). This is the precise condition the fix guarantees.
+        FileStoreTable fileStoreTable = paimonTable("TPE");
+        Iterator<ManifestEntry> it =
+                fileStoreTable
+                        .newSnapshotReader()
+                        .withPartitionFilter(Collections.singletonMap("dt", "p1"))
+                        .onlyReadRealBuckets()
+                        .readFileIterator();
+        assertThat(it.hasNext()).isTrue();
+        while (it.hasNext()) {
+            ManifestEntry entry = it.next();
+            assertThat(entry.totalBuckets())
+                    .as(
+                            "Files in partition p1 must keep the partition's bucket count (4). "
+                                    + "If 2, FileSystemWriteRestore failed to fall back to "
+                                    + "PartitionBucketMapping for buckets that had no existing "
+                                    + "files at restore time, and stamped new files with the "
+                                    + "table-level default bucket count instead.")
+                    .isEqualTo(4);
+            assertThat(entry.bucket()).as("Bucket index must be in range [0, 3]").isBetween(0, 3);
+        }
+    }
+
     private void executeBoth(List<String> sqlList) {
         sqlList.forEach(
                 sql -> {
