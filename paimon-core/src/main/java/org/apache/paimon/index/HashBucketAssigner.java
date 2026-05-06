@@ -90,7 +90,11 @@ public class HashBucketAssigner implements BucketAssigner {
 
         int assigned = index.assign(hash, this::isMyBucket, maxBucketsNum, maxBucketId);
         if (LOG.isDebugEnabled()) {
-            LOG.debug("Assign {} to the partition {} key hash {}", assigned, partition, hash);
+            LOG.debug(
+                    "Assign {} to the partition {} key hash {}",
+                    assigned,
+                    org.apache.paimon.utils.PartitionLogFormatter.format(partition),
+                    hash);
         }
         if (assigned > maxBucketId) {
             maxBucketId = assigned;

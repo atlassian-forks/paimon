@@ -67,6 +67,9 @@ import org.apache.paimon.utils.TagManager;
 
 import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Cache;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import javax.annotation.Nullable;
 
 import java.time.Duration;
@@ -85,6 +88,8 @@ import static org.apache.paimon.utils.Preconditions.checkArgument;
  * @param <T> type of record to read and write.
  */
 abstract class AbstractFileStore<T> implements FileStore<T> {
+
+    private static final Logger LOG = LoggerFactory.getLogger(AbstractFileStore.class);
 
     protected final FileIO fileIO;
     protected final SchemaManager schemaManager;
@@ -267,6 +272,11 @@ abstract class AbstractFileStore<T> implements FileStore<T> {
         if (snapshotCommit == null) {
             snapshotCommit = new RenamingSnapshotCommit(snapshotManager, Lock.empty());
         }
+        LOG.info(
+                "[ROOT] AbstractFileStore.newCommit: table={}, commitUser={}, options.bucket()={} (this becomes FileStoreCommitImpl.numBucket fallback)",
+                tableName,
+                commitUser,
+                options.bucket());
         return new FileStoreCommitImpl(
                 snapshotCommit,
                 fileIO,

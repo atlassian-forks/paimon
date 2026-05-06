@@ -46,6 +46,7 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.data.RowData;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 import javax.annotation.Nullable;
 
@@ -76,6 +77,9 @@ public class StoreCompactOperator extends PrepareCommitOperator<RowData, Committ
     private transient StoreSinkWrite write;
     private transient DataFileMetaSerializer dataFileMetaSerializer;
     private transient Set<Pair<BinaryRow, Integer>> waitToCompact;
+    /** Cached "<idx>/<parallelism>" subtask label, also published as MDC paimon.subtask. */
+    private transient String subtaskLabel;
+
     protected transient @Nullable WriteRestore writeRestore;
 
     protected transient @Nullable WriterRefresher writeRefresher;
@@ -142,6 +146,22 @@ public class StoreCompactOperator extends PrepareCommitOperator<RowData, Committ
         super.open();
         dataFileMetaSerializer = new DataFileMetaSerializer();
         waitToCompact = new LinkedHashSet<>();
+
+        // Mirror RowDataStoreWriteOperator: publish the Flink subtask label as MDC for the
+        // lifetime of this operator on its task thread so that downstream Paimon log lines
+        // (Sort spill, External merge, MergeTreeWriter rolled L0 file, BufferFile{Writer,Reader})
+        // emitted from this thread can be filtered by %X{paimon.subtask}.
+        if (getRuntimeContext() != null) {
+            int idx = getRuntimeContext().getTaskInfo().getIndexOfThisSubtask();
+            int parallelism = getRuntimeContext().getTaskInfo().getNumberOfParallelSubtasks();
+            this.subtaskLabel = idx + "/" + parallelism;
+            MDC.put(RowDataStoreWriteOperator.SUBTASK_MDC_KEY, this.subtaskLabel);
+            LOG.info(
+                    "StoreCompactOperator open subtask={} table={} fullCompaction={}",
+                    subtaskLabel,
+                    table.name(),
+                    fullCompaction);
+        }
     }
 
     @Override
@@ -154,14 +174,16 @@ public class StoreCompactOperator extends PrepareCommitOperator<RowData, Committ
         byte[] serializedFiles = record.getBinary(3);
         List<DataFileMeta> files = dataFileMetaSerializer.deserializeList(serializedFiles);
 
-        if (LOG.isDebugEnabled()) {
-            LOG.debug(
-                    "Store compact operator received record, snapshotId {}, partition {}, bucket {}, files {}",
-                    snapshotId,
-                    partition,
-                    bucket,
-                    files);
-        }
+        // Promoted to INFO: low volume (one record per (partition, bucket)) and very useful for
+        // attributing subsequent slow compactions back to upstream input.
+        LOG.info(
+                "StoreCompactOperator received record subtask={} table={} snapshotId={} partition={} bucket={} files={}",
+                subtaskLabel,
+                table.name(),
+                snapshotId,
+                partition,
+                bucket,
+                files.size());
 
         if (write.streamingMode()) {
             write.notifyNewFiles(snapshotId, partition, bucket, files);
@@ -179,9 +201,58 @@ public class StoreCompactOperator extends PrepareCommitOperator<RowData, Committ
     protected List<Committable> prepareCommit(boolean waitCompaction, long checkpointId)
             throws IOException {
 
+        long roundStart = System.nanoTime();
+        int total = waitToCompact.size();
+        LOG.info(
+                "StoreCompactOperator prepareCommit START subtask={} table={} pendingCompactions={} fullCompaction={} checkpointId={}",
+                subtaskLabel,
+                table.name(),
+                total,
+                fullCompaction,
+                checkpointId);
+
         try {
+            int idx = 0;
             for (Pair<BinaryRow, Integer> partitionBucket : waitToCompact) {
-                write.compact(partitionBucket.getKey(), partitionBucket.getRight(), fullCompaction);
+                idx++;
+                BinaryRow partition = partitionBucket.getKey();
+                int bucket = partitionBucket.getRight();
+                long t0 = System.nanoTime();
+                LOG.info(
+                        "Compact START   subtask={} table={} partition={} bucket={} ({}/{}) fullCompaction={}",
+                        subtaskLabel,
+                        table.name(),
+                        partition,
+                        bucket,
+                        idx,
+                        total,
+                        fullCompaction);
+                try {
+                    write.compact(partition, bucket, fullCompaction);
+                    long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+                    LOG.info(
+                            "Compact END     subtask={} table={} partition={} bucket={} ({}/{}) elapsedMs={}",
+                            subtaskLabel,
+                            table.name(),
+                            partition,
+                            bucket,
+                            idx,
+                            total,
+                            elapsedMs);
+                } catch (Exception inner) {
+                    long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+                    LOG.warn(
+                            "Compact FAILED  subtask={} table={} partition={} bucket={} ({}/{}) elapsedMs={}",
+                            subtaskLabel,
+                            table.name(),
+                            partition,
+                            bucket,
+                            idx,
+                            total,
+                            elapsedMs,
+                            inner);
+                    throw inner;
+                }
             }
         } catch (Exception e) {
             throw new RuntimeException("Exception happens while executing compaction.", e);
@@ -191,6 +262,15 @@ public class StoreCompactOperator extends PrepareCommitOperator<RowData, Committ
         List<Committable> committables = write.prepareCommit(waitCompaction, checkpointId);
 
         tryRefreshWrite();
+
+        long elapsedMs = (System.nanoTime() - roundStart) / 1_000_000;
+        LOG.info(
+                "StoreCompactOperator prepareCommit END   subtask={} table={} compacted={} committables={} elapsedMs={}",
+                subtaskLabel,
+                table.name(),
+                total,
+                committables.size(),
+                elapsedMs);
         return committables;
     }
 
@@ -203,6 +283,10 @@ public class StoreCompactOperator extends PrepareCommitOperator<RowData, Committ
 
     @Override
     public void close() throws Exception {
+        if (subtaskLabel != null) {
+            MDC.remove(RowDataStoreWriteOperator.SUBTASK_MDC_KEY);
+            subtaskLabel = null;
+        }
         super.close();
         write.close();
     }

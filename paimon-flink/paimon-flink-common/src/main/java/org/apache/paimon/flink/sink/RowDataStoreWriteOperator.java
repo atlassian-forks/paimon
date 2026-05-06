@@ -23,6 +23,7 @@ import org.apache.paimon.flink.log.LogWriteCallback;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.SinkRecord;
+import org.apache.paimon.utils.RateLogger;
 
 import org.apache.flink.api.common.functions.Function;
 import org.apache.flink.api.common.functions.OpenContext;
@@ -41,6 +42,8 @@ import org.apache.flink.streaming.api.watermark.Watermark;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.streaming.util.functions.StreamingFunctionUtils;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 import javax.annotation.Nullable;
 
@@ -61,6 +64,29 @@ public class RowDataStoreWriteOperator extends TableWriteOperator<InternalRow> {
     private transient SimpleContext sinkContext;
     @Nullable private transient LogWriteCallback logCallback;
     private transient boolean logIgnoreDelete;
+
+    // Sampled ingress-rate logger so you can see the upstream feed-rate per subtask
+    // even when no other Paimon log lines fire (e.g. when the writer thread is blocked
+    // in disk I/O during external sort/merge).
+    private static final long INGRESS_LOG_EVERY_RECORDS =
+            Long.getLong("paimon.sink.ingress.log.every.records", 1_000_000L);
+
+    private transient RateLogger ingressRate;
+
+    /**
+     * SLF4J MDC key under which the Flink subtask label (e.g. {@code "211/512"}) is published for
+     * the lifetime of this operator on its task thread. Layouts can include {@code
+     * %X{paimon.subtask}} so that every log line emitted on the writer thread (including those from
+     * Paimon-internal classes that don't have a Flink handle, e.g. {@code BufferFileWriterImpl})
+     * inherits the subtask context.
+     *
+     * <p>Complements {@code paimon.id} (set by {@code MergeTreeWriter}) which carries the (table,
+     * partition, bucket) tuple - bucket is a Paimon concept and is generally distinct from the
+     * Flink subtask index.
+     */
+    public static final String SUBTASK_MDC_KEY = "paimon.subtask";
+
+    private transient String subtaskLabel;
 
     /** We listen to this ourselves because we don't have an {@link InternalTimerService}. */
     private long currentWatermark = Long.MIN_VALUE;
@@ -97,6 +123,30 @@ public class RowDataStoreWriteOperator extends TableWriteOperator<InternalRow> {
         super.open();
 
         this.sinkContext = new SimpleContext(getProcessingTimeService());
+        // Use the operator name (which carries table name + subtask index) so logs are
+        // immediately greppable for a specific (211/512) subtask.
+        String name =
+                getRuntimeContext() != null
+                        ? getRuntimeContext().getTaskInfo().getTaskNameWithSubtasks()
+                        : "RowDataStoreWriteOperator";
+        this.ingressRate =
+                new RateLogger(
+                        LoggerFactory.getLogger(RowDataStoreWriteOperator.class),
+                        "sink-ingress " + name,
+                        INGRESS_LOG_EVERY_RECORDS);
+
+        // Publish the Flink subtask label as MDC for the lifetime of this operator on its
+        // task thread.  Paimon-internal logs (sort spill, merge, MergeTreeWriter, BufferFile*)
+        // emitted from this thread will then inherit it via %X{paimon.subtask} in the log
+        // layout, alongside the Paimon (table, partition, bucket) identifier already plumbed
+        // via paimon.id from MergeTreeWriter.
+        if (getRuntimeContext() != null) {
+            int idx = getRuntimeContext().getTaskInfo().getIndexOfThisSubtask();
+            int parallelism = getRuntimeContext().getTaskInfo().getNumberOfParallelSubtasks();
+            this.subtaskLabel = idx + "/" + parallelism;
+            MDC.put(SUBTASK_MDC_KEY, this.subtaskLabel);
+        }
+
         if (logSinkFunction != null) {
             openFunction(logSinkFunction);
             logCallback = new LogWriteCallback();
@@ -144,6 +194,10 @@ public class RowDataStoreWriteOperator extends TableWriteOperator<InternalRow> {
             throw new IOException(e);
         }
 
+        if (ingressRate != null) {
+            ingressRate.onUnit(0L);
+        }
+
         if (record != null
                 && logSinkFunction != null
                 && (!logIgnoreDelete || record.row().getRowKind().isAdd())) {
@@ -174,6 +228,16 @@ public class RowDataStoreWriteOperator extends TableWriteOperator<InternalRow> {
 
     @Override
     public void close() throws Exception {
+        if (ingressRate != null) {
+            ingressRate.close();
+        }
+        // Best-effort: clear the MDC entry we set in open() so the task thread doesn't leak the
+        // subtask label after the operator is closed (especially important when a TM thread is
+        // reused across operators in a chained pipeline / batch job).
+        if (subtaskLabel != null) {
+            MDC.remove(SUBTASK_MDC_KEY);
+            subtaskLabel = null;
+        }
         super.close();
 
         if (logSinkFunction != null) {
