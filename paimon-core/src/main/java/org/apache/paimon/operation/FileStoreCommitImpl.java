@@ -1550,8 +1550,7 @@ public class FileStoreCommitImpl implements FileStoreCommit {
             // suppressed by retry logic.
             for (Map.Entry<BinaryRow, Map<String, Set<Integer>>> e :
                     bucketCountsByPartitionAndOrigin.entrySet()) {
-                Set<Integer> baseValues =
-                        e.getValue().getOrDefault("BASE", Collections.emptySet());
+                Set<Integer> baseValues = e.getValue().getOrDefault("BASE", Collections.emptySet());
                 Set<Integer> deltaValues =
                         e.getValue().getOrDefault("DELTA", Collections.emptySet());
                 Set<Integer> union = new TreeSet<>();
@@ -1796,8 +1795,7 @@ public class FileStoreCommitImpl implements FileStoreCommit {
             List<SimpleFileEntry> baseEntries,
             List<SimpleFileEntry> changes,
             Throwable cause) {
-        return createConflictException(
-                message, baseCommitUser, baseEntries, changes, null, cause);
+        return createConflictException(message, baseCommitUser, baseEntries, changes, null, cause);
     }
 
     /**
@@ -1847,9 +1845,7 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                                 .collect(Collectors.joining("\n"));
         String changesString =
                 "Changes are:\n"
-                        + changes.stream()
-                                .map(this::formatEntry)
-                                .collect(Collectors.joining("\n"));
+                        + changes.stream().map(this::formatEntry).collect(Collectors.joining("\n"));
 
         // Always emit a dedicated focused section for the conflicting partition. This is NOT
         // subject to the 50-entry cap because the focused list is the most useful evidence and
@@ -1890,8 +1886,7 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                                             .collect(Collectors.joining("\n")));
         }
 
-        String fullExtras =
-                focusPartition != null ? "\n\n" + focusedString : "";
+        String fullExtras = focusPartition != null ? "\n\n" + focusedString : "";
 
         RuntimeException fullException =
                 new RuntimeException(

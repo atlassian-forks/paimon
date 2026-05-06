@@ -79,6 +79,7 @@ public class StoreCompactOperator extends PrepareCommitOperator<RowData, Committ
     private transient Set<Pair<BinaryRow, Integer>> waitToCompact;
     /** Cached "<idx>/<parallelism>" subtask label, also published as MDC paimon.subtask. */
     private transient String subtaskLabel;
+
     protected transient @Nullable WriteRestore writeRestore;
 
     protected transient @Nullable WriterRefresher writeRefresher;
