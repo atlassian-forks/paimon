@@ -49,25 +49,11 @@ public interface WriteRestore {
             if (totalBuckets != null && totalBuckets != entry.totalBuckets()) {
                 throw new RuntimeException(
                         String.format(
-                                "Bucket data files has different total bucket number, %s vs %s, this should be a bug.",
-                                totalBuckets, entry.totalBuckets()));
+                                "Bucket data files has different total bucket number, %s vs %s for partition %s, this should be a buggg.",
+                                totalBuckets, entry.totalBuckets(), org.apache.paimon.utils.PartitionLogFormatter.format(entry.partition())));
             }
             totalBuckets = entry.totalBuckets();
-            LOG.info(
-                    "[EXTRACT] WriteRestore.extractDataFiles: kind={}, partition={}, bucket={}, "
-                            + "entry.totalBuckets={}, fileName={}",
-                    entry.kind(),
-                    org.apache.paimon.utils.PartitionLogFormatter.format(entry.partition()),
-                    entry.bucket(),
-                    entry.totalBuckets(),
-                    entry.fileName());
-            dataFiles.add(entry.file());
         }
-        LOG.info(
-                "[EXTRACT_DONE] WriteRestore.extractDataFiles: numEntries={}, "
-                        + "computed totalBuckets={} (null if no entries)",
-                entries.size(),
-                totalBuckets);
         return totalBuckets;
     }
 }

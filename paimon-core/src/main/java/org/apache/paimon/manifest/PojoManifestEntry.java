@@ -48,13 +48,6 @@ public class PojoManifestEntry implements ManifestEntry {
         this.bucket = bucket;
         this.totalBuckets = totalBuckets;
         this.file = file;
-        LOG.info(
-                "[CTOR] PojoManifestEntry: kind={}, partition={}, bucket={}, totalBuckets={}, file={}",
-                kind,
-                org.apache.paimon.utils.PartitionLogFormatter.format(partition),
-                bucket,
-                totalBuckets,
-                file == null ? null : file.fileName());
     }
 
     @Override

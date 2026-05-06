@@ -69,24 +69,9 @@ public class SimpleFileEntry implements FileEntry {
         this.minKey = minKey;
         this.maxKey = maxKey;
         this.externalPath = externalPath;
-        LOG.info(
-                "[CTOR] SimpleFileEntry: kind={}, partition={}, bucket={}, totalBuckets={}, fileName={}",
-                kind,
-                org.apache.paimon.utils.PartitionLogFormatter.format(partition),
-                bucket,
-                totalBuckets,
-                fileName);
     }
 
     public static SimpleFileEntry from(ManifestEntry entry) {
-        LOG.info(
-                "[FROM] SimpleFileEntry.from(ManifestEntry): kind={}, partition={}, bucket={}, "
-                        + "entry.totalBuckets={}, fileName={}",
-                entry.kind(),
-                org.apache.paimon.utils.PartitionLogFormatter.format(entry.partition()),
-                entry.bucket(),
-                entry.totalBuckets(),
-                entry.fileName());
         return new SimpleFileEntry(
                 entry.kind(),
                 entry.partition(),

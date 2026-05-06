@@ -78,13 +78,6 @@ public class ManifestEntrySerializer extends VersionedObjectSerializer<ManifestE
         BinaryRow partition = deserializeBinaryRow(row.getBinary(1));
         int bucket = row.getInt(2);
         int totalBuckets = row.getInt(3);
-        LOG.info(
-                "[DESER] ManifestEntrySerializer.convertFrom: kind={}, partition={}, bucket={}, "
-                        + "totalBuckets(read from manifest row col 3)={}",
-                kind,
-                org.apache.paimon.utils.PartitionLogFormatter.format(partition),
-                bucket,
-                totalBuckets);
         return ManifestEntry.create(
                 kind,
                 partition,

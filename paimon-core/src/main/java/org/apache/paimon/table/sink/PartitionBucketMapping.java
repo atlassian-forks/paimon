@@ -409,10 +409,13 @@ public class PartitionBucketMapping implements Serializable {
                         partitionStr = partitionRenderer.render(partition);
                     } catch (Throwable t) {
                         partitionStr =
-                                "<render failed: " + t.getClass().getSimpleName() + ">";
+                                org.apache.paimon.utils.PartitionLogFormatter.format(partition);
                     }
                 } else {
-                    partitionStr = String.valueOf(partition);
+                    // Renderer was lost (transient field, e.g. after deserialization) or never
+                    // set — best-effort untyped formatting so the log is still readable instead
+                    // of showing "BinaryRow@<hex>".
+                    partitionStr = org.apache.paimon.utils.PartitionLogFormatter.format(partition);
                 }
                 LOG.info(
                         "PartitionBucketMapping.resolveNumBuckets: writer first sees partition {} -> "
