@@ -111,14 +111,16 @@ public class FileSystemWriteRestore implements WriteRestore {
 
     private List<ManifestEntry> fetchManifestEntries(
             Snapshot snapshot, @Nullable BinaryRow partition, @Nullable Integer bucket) {
-        FileStoreScan snapshotScan = scan.withSnapshot(snapshot);
-        if (partition != null) {
-            snapshotScan = snapshotScan.withPartitionFilter(Collections.singletonList(partition));
-        }
-        if (bucket != null) {
-            snapshotScan = snapshotScan.withBucket(bucket);
-        }
-        return snapshotScan.plan().files();
+        // The scan instance is shared across calls. Always pass through the (possibly-null)
+        // partition and bucket so that any filter previously set by another invocation is
+        // explicitly cleared when this call wants no such filter. Otherwise leftover state would
+        // silently scope the plan to the previous (partition, bucket).
+        return scan.withSnapshot(snapshot)
+                .withPartitionFilter(
+                        partition == null ? null : Collections.singletonList(partition))
+                .withBucket(bucket)
+                .plan()
+                .files();
     }
 
     private Integer getDefaultTotalBuckets(Snapshot snapshot) {
