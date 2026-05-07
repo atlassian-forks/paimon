@@ -39,6 +39,9 @@ import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.StreamOperatorParameters;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.table.data.RowData;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 import java.io.IOException;
 import java.util.HashMap;
@@ -59,7 +62,13 @@ import static org.apache.paimon.utils.SerializationUtils.deserializeBinaryRow;
 public class MultiTablesStoreCompactOperator
         extends PrepareCommitOperator<RowData, MultiTableCommittable> {
 
+    private static final Logger LOG =
+            LoggerFactory.getLogger(MultiTablesStoreCompactOperator.class);
+
     private static final long serialVersionUID = 1L;
+
+    /** Cached "<idx>/<parallelism>" subtask label, also published as MDC paimon.subtask. */
+    private transient String subtaskLabel;
 
     private StoreSinkWrite.Provider storeSinkWriteProvider;
     private final CheckpointConfig checkpointConfig;
@@ -130,6 +139,22 @@ public class MultiTablesStoreCompactOperator
     public void open() throws Exception {
         super.open();
         dataFileMetaSerializer = new DataFileMetaSerializer();
+
+        // Mirror RowDataStoreWriteOperator / StoreCompactOperator: publish the Flink subtask
+        // label as MDC for the lifetime of this operator on its task thread so downstream
+        // Paimon-internal log lines emitted from this thread can be filtered by
+        // %X{paimon.subtask}.
+        if (getRuntimeContext() != null) {
+            int idx = getRuntimeContext().getTaskInfo().getIndexOfThisSubtask();
+            int parallelism = getRuntimeContext().getTaskInfo().getNumberOfParallelSubtasks();
+            this.subtaskLabel = idx + "/" + parallelism;
+            MDC.put(RowDataStoreWriteOperator.SUBTASK_MDC_KEY, this.subtaskLabel);
+            LOG.info(
+                    "MultiTablesStoreCompactOperator open subtask={} fullCompaction={} streaming={}",
+                    subtaskLabel,
+                    fullCompaction,
+                    isStreaming);
+        }
     }
 
     @Override
@@ -168,17 +193,51 @@ public class MultiTablesStoreCompactOperator
                                         memoryPoolFactory,
                                         getMetricGroup()));
 
-        if (write.streamingMode()) {
-            write.notifyNewFiles(snapshotId, partition, bucket, files);
-            // The full compact is not supported in streaming mode.
-            write.compact(partition, bucket, false);
-        } else {
-            Preconditions.checkArgument(
-                    files.isEmpty(),
-                    "Batch compact job does not concern what files are compacted. "
-                            + "They only need to know what buckets are compacted.");
-            write.compact(partition, bucket, fullCompaction);
+        boolean streaming = write.streamingMode();
+        long t0 = System.nanoTime();
+        LOG.info(
+                "Compact START   subtask={} table={} partition={} bucket={} streaming={} fullCompaction={} files={}",
+                subtaskLabel,
+                tableId,
+                partition,
+                bucket,
+                streaming,
+                fullCompaction,
+                files.size());
+
+        try {
+            if (streaming) {
+                write.notifyNewFiles(snapshotId, partition, bucket, files);
+                // The full compact is not supported in streaming mode.
+                write.compact(partition, bucket, false);
+            } else {
+                Preconditions.checkArgument(
+                        files.isEmpty(),
+                        "Batch compact job does not concern what files are compacted. "
+                                + "They only need to know what buckets are compacted.");
+                write.compact(partition, bucket, fullCompaction);
+            }
+        } catch (Exception inner) {
+            long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+            LOG.warn(
+                    "Compact FAILED  subtask={} table={} partition={} bucket={} elapsedMs={}",
+                    subtaskLabel,
+                    tableId,
+                    partition,
+                    bucket,
+                    elapsedMs,
+                    inner);
+            throw inner;
         }
+
+        long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+        LOG.info(
+                "Compact END     subtask={} table={} partition={} bucket={} elapsedMs={}",
+                subtaskLabel,
+                tableId,
+                partition,
+                bucket,
+                elapsedMs);
     }
 
     @Override
@@ -210,6 +269,10 @@ public class MultiTablesStoreCompactOperator
 
     @Override
     public void close() throws Exception {
+        if (subtaskLabel != null) {
+            MDC.remove(RowDataStoreWriteOperator.SUBTASK_MDC_KEY);
+            subtaskLabel = null;
+        }
         super.close();
         for (StoreSinkWrite write : writes.values()) {
             write.close();

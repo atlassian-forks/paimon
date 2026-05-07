@@ -212,6 +212,19 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                 createCompactManager(
                         partition, bucket, compactStrategy, compactExecutor, levels, dvMaintainer);
 
+        // Best-effort identifier prefixed onto every log line emitted from this writer.  Lets
+        // operators correlate Paimon-internal "Sort spill", "External merge",
+        // "MergeTreeWriter rolled L0 file" etc. log lines back to a particular
+        // (table, partition, bucket) tuple - particularly useful when a single TaskManager
+        // hosts many writers and the thread name only gives subtask index.
+        String identifier =
+                "t="
+                        + tableName
+                        + " p="
+                        + formatPartition(partitionType, partition)
+                        + " b="
+                        + bucket;
+
         return new MergeTreeWriter(
                 options.writeBufferSpillable(),
                 options.writeBufferSpillDiskSize(),
@@ -226,7 +239,8 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                 options.commitForceCompact(),
                 options.changelogProducer(),
                 restoreIncrement,
-                UserDefinedSeqComparator.create(valueType, options));
+                UserDefinedSeqComparator.create(valueType, options),
+                identifier);
     }
 
     private CompactStrategy createCompactStrategy(CoreOptions options) {
@@ -442,6 +456,36 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
         super.close();
         if (lookupFileCache != null) {
             lookupFileCache.invalidateAll();
+        }
+    }
+
+    /**
+     * Render a {@link BinaryRow} partition as a self-describing string of the form {@code
+     * {field1=value1, field2=value2}} for use in log identifiers. Falls back to a safe placeholder
+     * on any error so a malformed partition can never break a writer.
+     */
+    private static String formatPartition(RowType partitionType, BinaryRow partition) {
+        if (partitionType == null || partition == null || partitionType.getFieldCount() == 0) {
+            return "{}";
+        }
+        try {
+            StringBuilder sb = new StringBuilder(64);
+            sb.append('{');
+            int n = partitionType.getFieldCount();
+            for (int i = 0; i < n; i++) {
+                if (i > 0) {
+                    sb.append(", ");
+                }
+                sb.append(partitionType.getFieldNames().get(i)).append('=');
+                Object v =
+                        InternalRow.createFieldGetter(partitionType.getTypeAt(i), i)
+                                .getFieldOrNull(partition);
+                sb.append(v == null ? "null" : v.toString());
+            }
+            sb.append('}');
+            return sb.toString();
+        } catch (Throwable t) {
+            return "{?}";
         }
     }
 }

@@ -22,12 +22,17 @@ import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.manifest.ManifestEntry;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import javax.annotation.Nullable;
 
 import java.util.List;
 
 /** Restore for write to restore data files by partition and bucket from file system. */
 public interface WriteRestore {
+
+    Logger LOG = LoggerFactory.getLogger(WriteRestore.class);
 
     long latestCommittedIdentifier(String user);
 
@@ -44,11 +49,10 @@ public interface WriteRestore {
             if (totalBuckets != null && totalBuckets != entry.totalBuckets()) {
                 throw new RuntimeException(
                         String.format(
-                                "Bucket data files has different total bucket number, %s vs %s, this should be a bug.",
-                                totalBuckets, entry.totalBuckets()));
+                                "Bucket data files has different total bucket number, %s vs %s for partition %s, this should be a buggg.",
+                                totalBuckets, entry.totalBuckets(), org.apache.paimon.utils.PartitionLogFormatter.format(entry.partition())));
             }
             totalBuckets = entry.totalBuckets();
-            dataFiles.add(entry.file());
         }
         return totalBuckets;
     }

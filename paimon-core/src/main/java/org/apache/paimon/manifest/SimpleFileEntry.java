@@ -20,6 +20,9 @@ package org.apache.paimon.manifest;
 
 import org.apache.paimon.data.BinaryRow;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import javax.annotation.Nullable;
 
 import java.util.List;
@@ -28,6 +31,8 @@ import java.util.stream.Collectors;
 
 /** A simple {@link FileEntry} only contains identifier and min max key. */
 public class SimpleFileEntry implements FileEntry {
+
+    private static final Logger LOG = LoggerFactory.getLogger(SimpleFileEntry.class);
 
     private final FileKind kind;
     private final BinaryRow partition;
