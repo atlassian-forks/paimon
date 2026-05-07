@@ -19,7 +19,9 @@
 package org.apache.paimon.table.sink;
 
 import org.apache.paimon.data.BinaryRow;
+import org.apache.paimon.manifest.FileEntry;
 import org.apache.paimon.manifest.SimpleFileEntry;
+import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.FileStoreTable;
 
 import java.io.Serializable;
@@ -92,24 +94,29 @@ public class PartitionBucketMapping implements Serializable {
             return new PartitionBucketMapping(defaultBuckets, Collections.emptyMap());
         }
 
-        try {
-            List<SimpleFileEntry> entries = table.store().newScan().readSimpleEntries();
-            Map<BinaryRow, Integer> partitionBucketMap = new HashMap<>();
-            for (SimpleFileEntry entry : entries) {
-                int totalBuckets = entry.totalBuckets();
-                // Only store partitions whose bucket count differs from the default.
-                // This keeps the map empty for partitions that have never been rescaled,
-                // avoiding per-partition BinaryRow copies and Integer allocations entirely.
-                if (totalBuckets > 0 && totalBuckets != defaultBuckets) {
-                    BinaryRow partition = entry.partition();
-                    partitionBucketMap.putIfAbsent(partition.copy(), totalBuckets);
-                }
-            }
+        List<SimpleFileEntry> entries = table.store().newScan().readSimpleEntries();
+        return loadFromEntries(entries, table.schema());
+    }
 
-            return new PartitionBucketMapping(defaultBuckets, partitionBucketMap);
-        } catch (Exception e) {
+    public static PartitionBucketMapping loadFromEntries(
+            List<? extends FileEntry> entries, TableSchema tableSchema) {
+        int defaultBuckets = tableSchema.numBuckets();
+        if (tableSchema.partitionKeys().isEmpty()) {
             return new PartitionBucketMapping(defaultBuckets, Collections.emptyMap());
         }
+
+        Map<BinaryRow, Integer> partitionBucketMap = new HashMap<>();
+        for (FileEntry entry : entries) {
+            int totalBuckets = entry.totalBuckets();
+            // Only store partitions whose bucket count differs from the default.
+            // This keeps the map empty for partitions that have never been rescaled,
+            // avoiding per-partition BinaryRow copies and Integer allocations entirely.
+            if (totalBuckets > 0 && totalBuckets != defaultBuckets) {
+                BinaryRow partition = entry.partition();
+                partitionBucketMap.putIfAbsent(partition.copy(), totalBuckets);
+            }
+        }
+        return new PartitionBucketMapping(defaultBuckets, partitionBucketMap);
     }
 
     /**

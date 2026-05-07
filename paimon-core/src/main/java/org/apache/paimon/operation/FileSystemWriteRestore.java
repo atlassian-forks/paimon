@@ -27,6 +27,8 @@ import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.manifest.BucketFilter;
 import org.apache.paimon.manifest.ManifestEntry;
 import org.apache.paimon.partition.PartitionPredicate;
+import org.apache.paimon.schema.TableSchema;
+import org.apache.paimon.table.sink.PartitionBucketMapping;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.SnapshotManager;
 
@@ -108,11 +110,23 @@ public class FileSystemWriteRestore implements WriteRestore {
 
     private List<ManifestEntry> fetchManifestEntries(
             Snapshot snapshot, @Nullable BinaryRow partition, @Nullable Integer bucket) {
-        FileStoreScan snapshotScan = scan.withSnapshot(snapshot);
-        if (partition != null && bucket != null) {
-            snapshotScan = snapshotScan.withPartitionBucket(partition, bucket);
-        }
-        return snapshotScan.plan().files();
+        // The scan instance is shared across calls. Always pass through the (possibly-null)
+        // partition and bucket so that any filter previously set by another invocation is
+        // explicitly cleared when this call wants no such filter. Otherwise leftover state would
+        // silently scope the plan to the previous (partition, bucket).
+        return scan.withSnapshot(snapshot)
+                .withPartitionFilter(
+                        partition == null ? null : Collections.singletonList(partition))
+                .withBucket(bucket)
+                .plan()
+                .files();
+    }
+
+    private TableSchema getTableSchema(Snapshot snapshot) {
+        // Do not load from disk - some actions such as Rescale and some tests may modify
+        // schema options via an in-memory copy. Loading from disk will cause errors here.
+        Long schemaId = snapshot.schemaId();
+        return ((AbstractFileStoreScan) scan).scanTableSchema(schemaId);
     }
 
     public PrefetchedManifestEntries prefetchManifestEntries(Snapshot snapshot) {
@@ -146,8 +160,11 @@ public class FileSystemWriteRestore implements WriteRestore {
                     manifestEntries.size());
 
             RowType partitionType = scan.manifestsReader().partitionType();
+            TableSchema tableSchema = getTableSchema(snapshot);
+
             PrefetchedManifestEntries prefetchedManifestEntries =
-                    new PrefetchedManifestEntries(snapshot, partitionType, manifestEntries);
+                    new PrefetchedManifestEntries(
+                            snapshot, partitionType, manifestEntries, tableSchema);
 
             prefetchedManifestEntriesCache.put(
                     getPrefetchManifestEntriesCacheKey(), prefetchedManifestEntries);
@@ -191,6 +208,20 @@ public class FileSystemWriteRestore implements WriteRestore {
 
         List<DataFileMeta> restoreFiles = new ArrayList<>();
         Integer totalBuckets = WriteRestore.extractDataFiles(entries, restoreFiles);
+        if (totalBuckets == null) {
+            // totalBuckets can be null if `entries` is an empty list
+            // i.e. there are no data files in this (partition, bucket)
+            // in this case, WriteRestore cannot infer the totalBuckets value, as there are no
+            // matching manifest entries
+            // fallback to using PartitionBucketMapping for this
+            totalBuckets = resolveTotalBuckets(snapshot, partition);
+            LOG.info(
+                    "FileSystemWriteRestore no manifest entries found for table {}, partition {}, bucket {} - falling back to PartitionBucketMapping and resolved totalBuckets={}",
+                    snapshotManager.tablePath(),
+                    partition,
+                    bucket,
+                    totalBuckets);
+        }
 
         IndexFileMeta dynamicBucketIndex = null;
         if (scanDynamicBucketIndex) {
@@ -208,6 +239,34 @@ public class FileSystemWriteRestore implements WriteRestore {
                 snapshot, totalBuckets, restoreFiles, dynamicBucketIndex, deleteVectorsIndex);
     }
 
+    private Integer resolveTotalBuckets(Snapshot snapshot, BinaryRow partition) {
+        PartitionBucketMapping partitionBucketMapping;
+
+        if (usePrefetchManifestEntries) {
+            LOG.debug(
+                    "FileSystemWriteRestore resolveTotalBuckets using prefetched PartitionBucketMapping for table {}, partition {}",
+                    snapshotManager.tablePath(),
+                    partition);
+            PrefetchedManifestEntries prefetch =
+                    prefetchedManifestEntriesCache.getIfPresent(
+                            getPrefetchManifestEntriesCacheKey());
+            partitionBucketMapping = prefetch.partitionBucketMapping();
+        } else {
+            TableSchema tableSchema = getTableSchema(snapshot);
+            List<ManifestEntry> entries = fetchManifestEntries(snapshot, partition, null);
+            LOG.debug(
+                    "FileSystemWriteRestore resolveTotalBuckets fetching manifest entries for table {}, partition {}, defaultTotalBuckets={}, entries.size()={}",
+                    snapshotManager.tablePath(),
+                    partition,
+                    tableSchema.numBuckets(),
+                    entries.size());
+
+            partitionBucketMapping = PartitionBucketMapping.loadFromEntries(entries, tableSchema);
+        }
+
+        return partitionBucketMapping.resolveNumBuckets(partition);
+    }
+
     /**
      * Container for a {@link Snapshot}'s manifest entries, used by {@link FileSystemWriteRestore}
      * to broker thread-safe access to cached results.
@@ -217,12 +276,18 @@ public class FileSystemWriteRestore implements WriteRestore {
         private final Snapshot snapshot;
         private final RowType partitionType;
         private final List<ManifestEntry> manifestEntries;
+        private final PartitionBucketMapping partitionBucketMapping;
 
         public PrefetchedManifestEntries(
-                Snapshot snapshot, RowType partitionType, List<ManifestEntry> manifestEntries) {
+                Snapshot snapshot,
+                RowType partitionType,
+                List<ManifestEntry> manifestEntries,
+                TableSchema tableSchema) {
             this.snapshot = snapshot;
             this.partitionType = partitionType;
             this.manifestEntries = manifestEntries;
+            this.partitionBucketMapping =
+                    PartitionBucketMapping.loadFromEntries(manifestEntries, tableSchema);
         }
 
         public Snapshot snapshot() {
@@ -235,6 +300,10 @@ public class FileSystemWriteRestore implements WriteRestore {
 
         public List<ManifestEntry> manifestEntries() {
             return manifestEntries;
+        }
+
+        public PartitionBucketMapping partitionBucketMapping() {
+            return partitionBucketMapping;
         }
 
         public List<ManifestEntry> filter(BinaryRow partition, int bucket) {

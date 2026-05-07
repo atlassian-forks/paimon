@@ -119,7 +119,7 @@ public abstract class AbstractFileStoreScan implements FileStoreScan {
     }
 
     @Override
-    public FileStoreScan withPartitionFilter(List<BinaryRow> partitions) {
+    public FileStoreScan withPartitionFilter(@Nullable List<BinaryRow> partitions) {
         manifestsReader.withPartitionFilter(partitions);
         return this;
     }
@@ -147,6 +147,13 @@ public abstract class AbstractFileStoreScan implements FileStoreScan {
     public FileStoreScan withBucket(int bucket) {
         manifestsReader.withBucket(bucket);
         specifiedBucket = bucket;
+        return this;
+    }
+
+    @Override
+    public FileStoreScan withBucket(@Nullable Integer bucket) {
+        manifestsReader.withBucket(bucket);
+        this.specifiedBucket = bucket;
         return this;
     }
 
