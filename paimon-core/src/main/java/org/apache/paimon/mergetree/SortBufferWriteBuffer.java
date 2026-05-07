@@ -72,6 +72,30 @@ public class SortBufferWriteBuffer implements WriteBuffer {
             int sortMaxFan,
             CompressOptions compression,
             IOManager ioManager) {
+        this(
+                keyType,
+                valueType,
+                userDefinedSeqComparator,
+                memoryPool,
+                spillable,
+                maxDiskSize,
+                sortMaxFan,
+                compression,
+                ioManager,
+                "");
+    }
+
+    public SortBufferWriteBuffer(
+            RowType keyType,
+            RowType valueType,
+            @Nullable FieldsComparator userDefinedSeqComparator,
+            MemorySegmentPool memoryPool,
+            boolean spillable,
+            MemorySize maxDiskSize,
+            int sortMaxFan,
+            CompressOptions compression,
+            IOManager ioManager,
+            String identifier) {
         this.keyType = keyType;
         this.valueType = valueType;
         this.serializer = new KeyValueSerializer(keyType, valueType);
@@ -122,7 +146,8 @@ public class SortBufferWriteBuffer implements WriteBuffer {
                                 ioManager,
                                 sortMaxFan,
                                 compression,
-                                maxDiskSize)
+                                maxDiskSize,
+                                identifier == null ? "" : identifier)
                         : inMemorySortBuffer;
     }
 

@@ -135,7 +135,10 @@ public class GlobalFullCompactionSinkWrite extends StoreSinkWriteImpl {
 
     private void touchBucket(BinaryRow partition, int bucket) {
         if (LOG.isDebugEnabled()) {
-            LOG.debug("touch partition {}, bucket {}", partition, bucket);
+            LOG.debug(
+                    "touch partition {}, bucket {}",
+                    org.apache.paimon.utils.PartitionLogFormatter.format(partition),
+                    bucket);
         }
 
         // partition is a reused BinaryRow

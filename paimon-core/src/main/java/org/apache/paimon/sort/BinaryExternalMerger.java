@@ -27,6 +27,9 @@ import org.apache.paimon.disk.ChannelReaderInputView;
 import org.apache.paimon.disk.ChannelReaderInputViewIterator;
 import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.utils.MutableObjectIterator;
+import org.apache.paimon.utils.RateLogger;
+
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -48,13 +51,36 @@ public class BinaryExternalMerger extends AbstractBinaryExternalMerger<BinaryRow
             RecordComparator comparator,
             BlockCompressionFactory compressionCodecFactory,
             int compressionBlockSize) {
+        this(
+                ioManager,
+                pageSize,
+                maxFanIn,
+                channelManager,
+                serializer,
+                comparator,
+                compressionCodecFactory,
+                compressionBlockSize,
+                "");
+    }
+
+    public BinaryExternalMerger(
+            IOManager ioManager,
+            int pageSize,
+            int maxFanIn,
+            SpillChannelManager channelManager,
+            BinaryRowSerializer serializer,
+            RecordComparator comparator,
+            BlockCompressionFactory compressionCodecFactory,
+            int compressionBlockSize,
+            String identifier) {
         super(
                 ioManager,
                 pageSize,
                 maxFanIn,
                 channelManager,
                 compressionCodecFactory,
-                compressionBlockSize);
+                compressionBlockSize,
+                identifier);
         this.serializer = serializer;
         this.comparator = comparator;
     }
@@ -79,14 +105,29 @@ public class BinaryExternalMerger extends AbstractBinaryExternalMerger<BinaryRow
         return reused;
     }
 
+    private static final long MERGE_LOG_EVERY_RECORDS =
+            Long.getLong("paimon.sort.merge.log.every.records", 1_000_000L);
+
     @Override
     protected void writeMergingOutput(
             MutableObjectIterator<BinaryRow> mergeIterator, AbstractPagedOutputView output)
             throws IOException {
         // read the merged stream and write the data back
         BinaryRow rec = serializer.createInstance();
-        while ((rec = mergeIterator.next(rec)) != null) {
-            serializer.serialize(rec, output);
+        RateLogger rate =
+                new RateLogger(
+                        LoggerFactory.getLogger(BinaryExternalMerger.class),
+                        "merge-records " + identifier,
+                        MERGE_LOG_EVERY_RECORDS);
+        try {
+            while ((rec = mergeIterator.next(rec)) != null) {
+                serializer.serialize(rec, output);
+                // We don't know the per-row serialized size cheaply; pass 0 so byte-rate is
+                // 0 and the log line emphasizes record-rate, which is what's interesting here.
+                rate.onUnit(0L);
+            }
+        } finally {
+            rate.close();
         }
     }
 }

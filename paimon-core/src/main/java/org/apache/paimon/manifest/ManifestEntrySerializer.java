@@ -25,6 +25,9 @@ import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.io.DataFileMetaSerializer;
 import org.apache.paimon.utils.VersionedObjectSerializer;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.function.Function;
 
 import static org.apache.paimon.utils.SerializationUtils.deserializeBinaryRow;
@@ -34,6 +37,8 @@ import static org.apache.paimon.utils.SerializationUtils.serializeBinaryRow;
 public class ManifestEntrySerializer extends VersionedObjectSerializer<ManifestEntry> {
 
     private static final long serialVersionUID = 1L;
+
+    private static final Logger LOG = LoggerFactory.getLogger(ManifestEntrySerializer.class);
 
     private final DataFileMetaSerializer dataFileMetaSerializer;
 
@@ -69,11 +74,15 @@ public class ManifestEntrySerializer extends VersionedObjectSerializer<ManifestE
             }
             throw new IllegalArgumentException("Unsupported version: " + version);
         }
+        FileKind kind = FileKind.fromByteValue(row.getByte(0));
+        BinaryRow partition = deserializeBinaryRow(row.getBinary(1));
+        int bucket = row.getInt(2);
+        int totalBuckets = row.getInt(3);
         return ManifestEntry.create(
-                FileKind.fromByteValue(row.getByte(0)),
-                deserializeBinaryRow(row.getBinary(1)),
-                row.getInt(2),
-                row.getInt(3),
+                kind,
+                partition,
+                bucket,
+                totalBuckets,
                 dataFileMetaSerializer.fromRow(row.getRow(4, dataFileMetaSerializer.numFields())));
     }
 

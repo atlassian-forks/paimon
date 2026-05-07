@@ -151,6 +151,15 @@ public class TableWriteCoordinator {
         List<DataFileMeta> restoreFiles = new ArrayList<>();
         List<ManifestEntry> entries = scan.withPartitionBucket(partition, bucket).plan().files();
         Integer totalBuckets = WriteRestore.extractDataFiles(entries, restoreFiles);
+        org.slf4j.LoggerFactory.getLogger(TableWriteCoordinator.class)
+                .info(
+                        "[COORD_SCAN] TableWriteCoordinator.scan: partition={}, bucket={}, "
+                                + "snapshotId={}, numEntries={}, totalBuckets(from manifests)={}",
+                        org.apache.paimon.utils.PartitionLogFormatter.format(partition),
+                        bucket,
+                        snapshot == null ? null : snapshot.id(),
+                        entries.size(),
+                        totalBuckets);
 
         IndexFileMeta dynamicBucketIndex = null;
         if (request.scanDynamicBucketIndex()) {
