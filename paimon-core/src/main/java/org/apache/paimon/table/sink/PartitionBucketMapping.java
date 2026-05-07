@@ -21,6 +21,7 @@ package org.apache.paimon.table.sink;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.manifest.FileEntry;
 import org.apache.paimon.manifest.SimpleFileEntry;
+import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.utils.RowDataToObjectArrayConverter;
 
@@ -158,11 +159,16 @@ public class PartitionBucketMapping implements Serializable {
         }
 
         List<SimpleFileEntry> entries = table.store().newScan().readSimpleEntries();
-        return loadFromEntries(entries, defaultBuckets);
+        return loadFromEntries(entries, table.schema());
     }
 
     public static PartitionBucketMapping loadFromEntries(
-            List<? extends FileEntry> entries, int defaultBuckets) {
+            List<? extends FileEntry> entries, TableSchema tableSchema) {
+        int defaultBuckets = tableSchema.numBuckets();
+        if (tableSchema.partitionKeys().isEmpty()) {
+            return new PartitionBucketMapping(defaultBuckets, Collections.emptyMap());
+        }
+
         Map<BinaryRow, Integer> partitionBucketMap = new HashMap<>();
         for (FileEntry entry : entries) {
             int totalBuckets = entry.totalBuckets();
