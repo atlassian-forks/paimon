@@ -23,6 +23,9 @@ import org.apache.paimon.io.CompactIncrement;
 import org.apache.paimon.io.DataIncrement;
 import org.apache.paimon.io.DataInputViewStreamWrapper;
 import org.apache.paimon.io.DataOutputViewStreamWrapper;
+import org.apache.paimon.utils.PartitionLogFormatter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
@@ -38,6 +41,8 @@ import static org.apache.paimon.utils.SerializationUtils.serializeBytes;
 public class CommitMessageImpl implements CommitMessage {
 
     private static final long serialVersionUID = 1L;
+
+    private static final Logger LOG = LoggerFactory.getLogger(CommitMessageImpl.class);
 
     private static final ThreadLocal<CommitMessageSerializer> CACHE =
             ThreadLocal.withInitial(CommitMessageSerializer::new);
@@ -59,6 +64,11 @@ public class CommitMessageImpl implements CommitMessage {
         this.totalBuckets = totalBuckets;
         this.dataIncrement = dataIncrement;
         this.compactIncrement = compactIncrement;
+        LOG.info(
+                "[CTOR] CommitMessageImpl: partition={}, bucket={}, totalBuckets={}",
+                PartitionLogFormatter.format(partition),
+                bucket,
+                totalBuckets);
     }
 
     @Override

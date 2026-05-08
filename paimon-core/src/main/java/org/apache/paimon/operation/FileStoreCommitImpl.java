@@ -62,6 +62,7 @@ import org.apache.paimon.utils.FileStorePathFactory;
 import org.apache.paimon.utils.IOUtils;
 import org.apache.paimon.utils.InternalRowPartitionComputer;
 import org.apache.paimon.utils.Pair;
+import org.apache.paimon.utils.PartitionLogFormatter;
 import org.apache.paimon.utils.SnapshotManager;
 
 import org.slf4j.Logger;
@@ -815,7 +816,16 @@ public class FileStoreCommitImpl implements FileStoreCommit {
         if (totalBuckets == null) {
             totalBuckets = numBucket;
         }
-
+        LOG.info(
+                "[MAKE_ENTRY] FileStoreCommitImpl.makeEntry: table={}, kind={}, partition={}, bucket={}, "
+                        + "commitMessage.totalBuckets={}, numBucket(fallback)={}, chosenTotalBuckets={}",
+                tableName,
+                kind,
+                PartitionLogFormatter.format(partitionType, commitMessage.partition()),
+                commitMessage.bucket(),
+                commitMessage.totalBuckets(),
+                numBucket,
+                totalBuckets);
         return ManifestEntry.create(
                 kind, commitMessage.partition(), commitMessage.bucket(), totalBuckets, file);
     }
@@ -1449,7 +1459,7 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                 Pair<RuntimeException, RuntimeException> conflictException =
                         createConflictException(
                                 "Total buckets of partition "
-                                        + entry.partition()
+                                        + PartitionLogFormatter.format(partitionType, entry.partition())
                                         + " changed from "
                                         + old
                                         + " to "
@@ -1458,7 +1468,8 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                                 baseCommitUser,
                                 baseEntries,
                                 deltaEntries,
-                                null);
+                                null,
+                                entry.partition());
                 LOG.warn("", conflictException.getLeft());
                 throw conflictException.getRight();
             }
@@ -1507,7 +1518,8 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                                     baseCommitUser,
                                     baseEntries,
                                     deltaEntries,
-                                    null);
+                                    null,
+                                    a.partition());
 
                     LOG.warn("", conflictException.getLeft());
                     throw conflictException.getRight();
@@ -1521,13 +1533,16 @@ public class FileStoreCommitImpl implements FileStoreCommit {
             List<SimpleFileEntry> baseEntries,
             List<SimpleFileEntry> deltaEntries) {
         return e -> {
+            // File-deletion conflicts can span any partition (the merge happens across all of
+            // them), so we don't pass a focused partition here.
             Pair<RuntimeException, RuntimeException> conflictException =
                     createConflictException(
                             "File deletion conflicts detected! Give up committing.",
                             baseCommitUser,
                             baseEntries,
                             deltaEntries,
-                            e);
+                            e,
+                            null);
             LOG.warn("", conflictException.getLeft());
             return conflictException.getRight();
         };
@@ -1604,7 +1619,25 @@ public class FileStoreCommitImpl implements FileStoreCommit {
             String baseCommitUser,
             List<SimpleFileEntry> baseEntries,
             List<SimpleFileEntry> changes,
-            Throwable cause) {
+            Throwable cause,
+            @Nullable BinaryRow focusedPartition) {
+        // When a specific partition is responsible for the conflict, narrow the entry lists to
+        // only that partition so the error log/message stays small and easy to read. The original
+        // unfiltered counts are kept around so we can still tell the user how many entries were
+        // suppressed.
+        int totalBaseEntries = baseEntries.size();
+        int totalChanges = changes.size();
+        if (focusedPartition != null) {
+            baseEntries =
+                    baseEntries.stream()
+                            .filter(it -> focusedPartition.equals(it.partition()))
+                            .collect(Collectors.toList());
+            changes =
+                    changes.stream()
+                            .filter(it -> focusedPartition.equals(it.partition()))
+                            .collect(Collectors.toList());
+        }
+
         String possibleCauses =
                 String.join(
                         "\n",
@@ -1626,14 +1659,28 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                         + baseCommitUser
                         + "; Current commit user is: "
                         + commitUser;
+        String focusedPartitionString =
+                focusedPartition == null
+                        ? ""
+                        : "Focused partition: "
+                                + PartitionLogFormatter.format(partitionType, focusedPartition)
+                                + " (showing "
+                                + baseEntries.size()
+                                + " of "
+                                + totalBaseEntries
+                                + " base entries and "
+                                + changes.size()
+                                + " of "
+                                + totalChanges
+                                + " changes that match this partition)\n\n";
         String baseEntriesString =
-                "Base entries are:\n"
-                        + baseEntries.stream()
-                                .map(Object::toString)
-                                .collect(Collectors.joining("\n"));
+                "Base entries are:\n" + baseEntries.stream()
+                        .map(it -> it.toString() + "[" + PartitionLogFormatter.format(partitionType, it.partition()) + "]")
+                        .collect(Collectors.joining("\n"));
         String changesString =
-                "Changes are:\n"
-                        + changes.stream().map(Object::toString).collect(Collectors.joining("\n"));
+                "Changes are:\n" + changes.stream()
+                        .map(it -> it.toString() + "[" + PartitionLogFormatter.format(partitionType, it.partition()) + "]")
+                        .collect(Collectors.joining("\n"));
 
         RuntimeException fullException =
                 new RuntimeException(
@@ -1643,6 +1690,7 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                                 + "\n\n"
                                 + commitUserString
                                 + "\n\n"
+                                + focusedPartitionString
                                 + baseEntriesString
                                 + "\n\n"
                                 + changesString,
@@ -1670,6 +1718,7 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                                     + "\n\n"
                                     + commitUserString
                                     + "\n\n"
+                                    + focusedPartitionString
                                     + baseEntriesString
                                     + "\n\n"
                                     + changesString

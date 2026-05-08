@@ -21,6 +21,7 @@ package org.apache.paimon.operation;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.manifest.ManifestEntry;
+import org.apache.paimon.utils.PartitionLogFormatter;
 
 import javax.annotation.Nullable;
 
@@ -44,8 +45,8 @@ public interface WriteRestore {
             if (totalBuckets != null && totalBuckets != entry.totalBuckets()) {
                 throw new RuntimeException(
                         String.format(
-                                "Bucket data files has different total bucket number, %s vs %s, this should be a bug.",
-                                totalBuckets, entry.totalBuckets()));
+                                "Bucket data files has different total bucket number, %s vs %s, partition: %s, this should be a bug.",
+                                totalBuckets, entry.totalBuckets(), PartitionLogFormatter.format(entry.partition())));
             }
             totalBuckets = entry.totalBuckets();
             dataFiles.add(entry.file());

@@ -39,6 +39,7 @@ import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.CommitIncrement;
 import org.apache.paimon.utils.ExecutorThreadFactory;
+import org.apache.paimon.utils.PartitionLogFormatter;
 import org.apache.paimon.utils.RecordWriter;
 import org.apache.paimon.utils.SnapshotManager;
 
@@ -114,6 +115,11 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
         this.tableName = tableName;
         this.writerNumberMax = options.writeMaxWritersToSpill();
         this.legacyPartitionName = options.legacyPartitionName();
+
+        LOG.info(
+                "[CTOR] AbstractFileStoreWrite: table={}, options.bucket()={} (this becomes numBuckets table-default)",
+                tableName,
+                options.bucket());
     }
 
     @Override
@@ -226,6 +232,13 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                             .getOrCompute()
                             .ifPresent(compactIncrement.newIndexFiles()::add);
                 }
+                LOG.info(
+                        "[PREP_COMMIT] AbstractFileStoreWrite.prepareCommit: table={}, partition={}, bucket={}, "
+                        + "writerContainer.totalBuckets={} (will be set in CommitMessageImpl)",
+                        tableName,
+                        PartitionLogFormatter.format(partitionType, partition),
+                        bucket,
+                        writerContainer.totalBuckets);
                 CommitMessageImpl committable =
                         new CommitMessageImpl(
                                 partition,
@@ -413,9 +426,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     }
 
     public WriterContainer<T> createWriterContainer(BinaryRow partition, int bucket) {
-        if (LOG.isDebugEnabled()) {
-            LOG.debug("Creating writer for partition {}, bucket {}", partition, bucket);
-        }
+        LOG.info("Creating writer for partition {}, bucket {}", PartitionLogFormatter.format(partition), bucket);
 
         if (writerNumber() >= writerNumberMax) {
             try {
@@ -457,9 +468,19 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
         notifyNewWriter(writer);
 
         Snapshot previousSnapshot = restored.snapshot();
+        int chosenTotalBuckets = firstNonNull(restored.totalBuckets(), numBuckets);
+        LOG.info(
+                "[CREATE_WRITER] AbstractFileStoreWrite.createWriterContainer: table={}, partition={}, bucket={}, "
+                        + "restored.totalBuckets={}, table-default numBuckets={}, WriterContainer.totalBuckets={}",
+                tableName,
+                PartitionLogFormatter.format(partitionType, partition),
+                bucket,
+                restored.totalBuckets(),
+                numBuckets,
+                chosenTotalBuckets);
         return new WriterContainer<>(
                 writer,
-                firstNonNull(restored.totalBuckets(), numBuckets),
+                chosenTotalBuckets,
                 indexMaintainer,
                 dvMaintainer,
                 previousSnapshot == null ? null : previousSnapshot.id());

@@ -30,6 +30,7 @@ import org.apache.paimon.partition.PartitionPredicate;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.sink.PartitionBucketMapping;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.utils.PartitionLogFormatter;
 import org.apache.paimon.utils.SnapshotManager;
 
 import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Cache;
@@ -202,7 +203,7 @@ public class FileSystemWriteRestore implements WriteRestore {
         LOG.info(
                 "FileSystemWriteRestore filtered manifestEntries for {}, {}, {}: {} entries",
                 snapshotManager.tablePath(),
-                partition,
+                PartitionLogFormatter.format(scan.manifestsReader().partitionType(), partition),
                 bucket,
                 entries.size());
 
@@ -218,7 +219,7 @@ public class FileSystemWriteRestore implements WriteRestore {
             LOG.info(
                     "FileSystemWriteRestore no manifest entries found for table {}, partition {}, bucket {} - falling back to PartitionBucketMapping and resolved totalBuckets={}",
                     snapshotManager.tablePath(),
-                    partition,
+                    PartitionLogFormatter.format(scan.manifestsReader().partitionType(), partition),
                     bucket,
                     totalBuckets);
         }

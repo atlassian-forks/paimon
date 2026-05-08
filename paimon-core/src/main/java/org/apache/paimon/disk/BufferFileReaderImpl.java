@@ -32,6 +32,7 @@ public class BufferFileReaderImpl extends AbstractFileIOChannel implements Buffe
     public BufferFileReaderImpl(ID channelID) throws IOException {
         super(channelID, false);
         this.reader = new BufferFileChannelReader(fileChannel);
+        LOG.info("Spill reader OPEN path={}", channelID.getPath());
     }
 
     @Override

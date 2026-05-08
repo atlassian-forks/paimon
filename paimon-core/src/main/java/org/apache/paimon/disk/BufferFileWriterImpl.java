@@ -29,6 +29,7 @@ public class BufferFileWriterImpl extends AbstractFileIOChannel implements Buffe
 
     protected BufferFileWriterImpl(ID channelID) throws IOException {
         super(channelID, true);
+        LOG.info("Spill writer OPEN path={}", channelID.getPath());
     }
 
     @Override
