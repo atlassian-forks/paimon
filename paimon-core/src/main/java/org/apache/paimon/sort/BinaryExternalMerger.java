@@ -27,9 +27,6 @@ import org.apache.paimon.disk.ChannelReaderInputView;
 import org.apache.paimon.disk.ChannelReaderInputViewIterator;
 import org.apache.paimon.disk.IOManager;
 import org.apache.paimon.utils.MutableObjectIterator;
-import org.apache.paimon.utils.RateLogger;
-
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -105,29 +102,14 @@ public class BinaryExternalMerger extends AbstractBinaryExternalMerger<BinaryRow
         return reused;
     }
 
-    private static final long MERGE_LOG_EVERY_RECORDS =
-            Long.getLong("paimon.sort.merge.log.every.records", 1_000_000L);
-
     @Override
     protected void writeMergingOutput(
             MutableObjectIterator<BinaryRow> mergeIterator, AbstractPagedOutputView output)
             throws IOException {
         // read the merged stream and write the data back
         BinaryRow rec = serializer.createInstance();
-        RateLogger rate =
-                new RateLogger(
-                        LoggerFactory.getLogger(BinaryExternalMerger.class),
-                        "merge-records " + identifier,
-                        MERGE_LOG_EVERY_RECORDS);
-        try {
-            while ((rec = mergeIterator.next(rec)) != null) {
-                serializer.serialize(rec, output);
-                // We don't know the per-row serialized size cheaply; pass 0 so byte-rate is
-                // 0 and the log line emphasizes record-rate, which is what's interesting here.
-                rate.onUnit(0L);
-            }
-        } finally {
-            rate.close();
+        while ((rec = mergeIterator.next(rec)) != null) {
+            serializer.serialize(rec, output);
         }
     }
 }

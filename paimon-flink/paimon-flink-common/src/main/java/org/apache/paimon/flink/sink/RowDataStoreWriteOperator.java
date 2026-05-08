@@ -23,7 +23,6 @@ import org.apache.paimon.flink.log.LogWriteCallback;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.SinkRecord;
-import org.apache.paimon.utils.RateLogger;
 
 import org.apache.flink.api.common.functions.Function;
 import org.apache.flink.api.common.functions.OpenContext;
@@ -43,7 +42,6 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.tasks.ProcessingTimeService;
 import org.apache.flink.streaming.util.functions.StreamingFunctionUtils;
 
-import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 
 import javax.annotation.Nullable;
@@ -65,14 +63,6 @@ public class RowDataStoreWriteOperator extends TableWriteOperator<InternalRow> {
     private transient SimpleContext sinkContext;
     @Nullable private transient LogWriteCallback logCallback;
     private transient boolean logIgnoreDelete;
-
-    // Sampled ingress-rate logger so you can see the upstream feed-rate per subtask
-    // even when no other Paimon log lines fire (e.g. when the writer thread is blocked
-    // in disk I/O during external sort/merge).
-    private static final long INGRESS_LOG_EVERY_RECORDS =
-            Long.getLong("paimon.sink.ingress.log.every.records", 1_000_000L);
-
-    private transient RateLogger ingressRate;
 
     /**
      * SLF4J MDC key under which the Flink subtask label (e.g. {@code "211/512"}) is published for
@@ -124,17 +114,6 @@ public class RowDataStoreWriteOperator extends TableWriteOperator<InternalRow> {
         super.open();
 
         this.sinkContext = new SimpleContext(getProcessingTimeService());
-        // Use the operator name (which carries table name + subtask index) so logs are
-        // immediately greppable for a specific (211/512) subtask.
-        String name =
-                getRuntimeContext() != null
-                        ? getRuntimeContext().getTaskInfo().getTaskNameWithSubtasks()
-                        : "RowDataStoreWriteOperator";
-        this.ingressRate =
-                new RateLogger(
-                        LoggerFactory.getLogger(RowDataStoreWriteOperator.class),
-                        "sink-ingress " + name,
-                        INGRESS_LOG_EVERY_RECORDS);
 
         // Publish the Flink subtask label as MDC for the lifetime of this operator on its
         // task thread.  Paimon-internal logs (sort spill, merge, MergeTreeWriter, BufferFile*)
@@ -195,10 +174,6 @@ public class RowDataStoreWriteOperator extends TableWriteOperator<InternalRow> {
             throw new IOException(e);
         }
 
-        if (ingressRate != null) {
-            ingressRate.onUnit(0L);
-        }
-
         if (record != null
                 && logSinkFunction != null
                 && (!logIgnoreDelete || record.row().getRowKind().isAdd())) {
@@ -229,9 +204,6 @@ public class RowDataStoreWriteOperator extends TableWriteOperator<InternalRow> {
 
     @Override
     public void close() throws Exception {
-        if (ingressRate != null) {
-            ingressRate.close();
-        }
         // Best-effort: clear the MDC entry we set in open() so the task thread doesn't leak the
         // subtask label after the operator is closed (especially important when a TM thread is
         // reused across operators in a chained pipeline / batch job).
