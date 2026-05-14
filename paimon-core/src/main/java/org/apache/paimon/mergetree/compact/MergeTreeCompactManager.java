@@ -132,11 +132,7 @@ public class MergeTreeCompactManager extends CompactFutureManager {
                     taskFuture == null,
                     "A compaction task is still running while the user "
                             + "forces a new compaction. This is unexpected.");
-            if (LOG.isDebugEnabled()) {
-                LOG.debug(
-                        "Trigger forced full compaction. Picking from the following runs\n{}",
-                        runs);
-            }
+            LOG.info("Trigger forced full compaction. Picking from the following runs\n{}", runs);
             optionalUnit =
                     CompactStrategy.pickFullCompaction(
                             levels.numberOfLevels(),
@@ -148,9 +144,7 @@ public class MergeTreeCompactManager extends CompactFutureManager {
             if (taskFuture != null) {
                 return;
             }
-            if (LOG.isDebugEnabled()) {
-                LOG.debug("Trigger normal compaction. Picking from the following runs\n{}", runs);
-            }
+            LOG.info("Trigger normal compaction. Picking from the following runs\n{}", runs);
             optionalUnit =
                     strategy.pick(levels.numberOfLevels(), runs)
                             .filter(unit -> !unit.files().isEmpty())
@@ -175,20 +169,18 @@ public class MergeTreeCompactManager extends CompactFutureManager {
                                     && (unit.outputLevel() >= levels.nonEmptyHighestLevel()
                                             || dvMaintainer != null);
 
-                    if (LOG.isDebugEnabled()) {
-                        LOG.debug(
-                                "Submit compaction with files (name, level, size): "
-                                        + levels.levelSortedRuns().stream()
-                                                .flatMap(lsr -> lsr.run().files().stream())
-                                                .map(
-                                                        file ->
-                                                                String.format(
-                                                                        "(%s, %d, %d)",
-                                                                        file.fileName(),
-                                                                        file.level(),
-                                                                        file.fileSize()))
-                                                .collect(Collectors.joining(", ")));
-                    }
+                    LOG.info(
+                            "Submit compaction with files (name, level, size): "
+                                    + levels.levelSortedRuns().stream()
+                                            .flatMap(lsr -> lsr.run().files().stream())
+                                            .map(
+                                                    file ->
+                                                            String.format(
+                                                                    "(%s, %d, %d)",
+                                                                    file.fileName(),
+                                                                    file.level(),
+                                                                    file.fileSize()))
+                                            .collect(Collectors.joining(", ")));
                     submitCompaction(unit, dropDelete);
                 });
     }
@@ -225,18 +217,16 @@ public class MergeTreeCompactManager extends CompactFutureManager {
                             forceRewriteAllFiles);
         }
 
-        if (LOG.isDebugEnabled()) {
-            LOG.debug(
-                    "Pick these files (name, level, size) for {} compaction: {}",
-                    task.getClass().getSimpleName(),
-                    unit.files().stream()
-                            .map(
-                                    file ->
-                                            String.format(
-                                                    "(%s, %d, %d)",
-                                                    file.fileName(), file.level(), file.fileSize()))
-                            .collect(Collectors.joining(", ")));
-        }
+        LOG.info(
+                "Pick these files (name, level, size) for {} compaction: {}",
+                task.getClass().getSimpleName(),
+                unit.files().stream()
+                        .map(
+                                file ->
+                                        String.format(
+                                                "(%s, %d, %d)",
+                                                file.fileName(), file.level(), file.fileSize()))
+                        .collect(Collectors.joining(", ")));
         taskFuture = executor.submit(task);
         if (metricsReporter != null) {
             metricsReporter.increaseCompactionsQueuedCount();
@@ -251,19 +241,15 @@ public class MergeTreeCompactManager extends CompactFutureManager {
         Optional<CompactResult> result = innerGetCompactionResult(blocking);
         result.ifPresent(
                 r -> {
-                    if (LOG.isDebugEnabled()) {
-                        LOG.debug(
-                                "Update levels in compact manager with these changes:\nBefore:\n{}\nAfter:\n{}",
-                                r.before(),
-                                r.after());
-                    }
+                    LOG.info(
+                            "Update levels in compact manager with these changes:\nBefore:\n{}\nAfter:\n{}",
+                            r.before(),
+                            r.after());
                     levels.update(r.before(), r.after());
                     MetricUtils.safeCall(this::reportMetrics, LOG);
-                    if (LOG.isDebugEnabled()) {
-                        LOG.debug(
-                                "Levels in compact manager updated. Current runs are\n{}",
-                                levels.levelSortedRuns());
-                    }
+                    LOG.info(
+                            "Levels in compact manager updated. Current runs are\n{}",
+                            levels.levelSortedRuns());
                 });
         return result;
     }

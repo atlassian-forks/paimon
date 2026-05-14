@@ -46,7 +46,9 @@ public interface WriteRestore {
                 throw new RuntimeException(
                         String.format(
                                 "Bucket data files has different total bucket number, %s vs %s, partition: %s, this should be a bug.",
-                                totalBuckets, entry.totalBuckets(), PartitionLogFormatter.format(entry.partition())));
+                                totalBuckets,
+                                entry.totalBuckets(),
+                                PartitionLogFormatter.format(entry.partition())));
             }
             totalBuckets = entry.totalBuckets();
             dataFiles.add(entry.file());

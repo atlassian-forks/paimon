@@ -68,9 +68,7 @@ public abstract class CompactTask implements Callable<CompactResult> {
                     },
                     LOG);
 
-            if (LOG.isDebugEnabled()) {
-                LOG.debug(logMetric(startMillis, result.before(), result.after()));
-            }
+            LOG.info(logMetric(startMillis, result.before(), result.after()));
             return result;
         } finally {
             MetricUtils.safeCall(this::stopTimer, LOG);

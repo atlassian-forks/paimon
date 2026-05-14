@@ -234,7 +234,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                 }
                 LOG.info(
                         "[PREP_COMMIT] AbstractFileStoreWrite.prepareCommit: table={}, partition={}, bucket={}, "
-                        + "writerContainer.totalBuckets={} (will be set in CommitMessageImpl)",
+                                + "writerContainer.totalBuckets={} (will be set in CommitMessageImpl)",
                         tableName,
                         PartitionLogFormatter.format(partitionType, partition),
                         bucket,
@@ -426,7 +426,10 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     }
 
     public WriterContainer<T> createWriterContainer(BinaryRow partition, int bucket) {
-        LOG.info("Creating writer for partition {}, bucket {}", PartitionLogFormatter.format(partition), bucket);
+        LOG.info(
+                "Creating writer for partition {}, bucket {}",
+                PartitionLogFormatter.format(partition),
+                bucket);
 
         if (writerNumber() >= writerNumberMax) {
             try {

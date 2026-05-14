@@ -1459,7 +1459,8 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                 Pair<RuntimeException, RuntimeException> conflictException =
                         createConflictException(
                                 "Total buckets of partition "
-                                        + PartitionLogFormatter.format(partitionType, entry.partition())
+                                        + PartitionLogFormatter.format(
+                                                partitionType, entry.partition())
                                         + " changed from "
                                         + old
                                         + " to "
@@ -1674,13 +1675,27 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                                 + totalChanges
                                 + " changes that match this partition)\n\n";
         String baseEntriesString =
-                "Base entries are:\n" + baseEntries.stream()
-                        .map(it -> it.toString() + "[" + PartitionLogFormatter.format(partitionType, it.partition()) + "]")
-                        .collect(Collectors.joining("\n"));
+                "Base entries are:\n"
+                        + baseEntries.stream()
+                                .map(
+                                        it ->
+                                                it.toString()
+                                                        + "["
+                                                        + PartitionLogFormatter.format(
+                                                                partitionType, it.partition())
+                                                        + "]")
+                                .collect(Collectors.joining("\n"));
         String changesString =
-                "Changes are:\n" + changes.stream()
-                        .map(it -> it.toString() + "[" + PartitionLogFormatter.format(partitionType, it.partition()) + "]")
-                        .collect(Collectors.joining("\n"));
+                "Changes are:\n"
+                        + changes.stream()
+                                .map(
+                                        it ->
+                                                it.toString()
+                                                        + "["
+                                                        + PartitionLogFormatter.format(
+                                                                partitionType, it.partition())
+                                                        + "]")
+                                .collect(Collectors.joining("\n"));
 
         RuntimeException fullException =
                 new RuntimeException(

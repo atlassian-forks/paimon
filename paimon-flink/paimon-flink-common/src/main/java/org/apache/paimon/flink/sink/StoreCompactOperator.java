@@ -154,14 +154,12 @@ public class StoreCompactOperator extends PrepareCommitOperator<RowData, Committ
         byte[] serializedFiles = record.getBinary(3);
         List<DataFileMeta> files = dataFileMetaSerializer.deserializeList(serializedFiles);
 
-        if (LOG.isDebugEnabled()) {
-            LOG.debug(
-                    "Store compact operator received record, snapshotId {}, partition {}, bucket {}, files {}",
-                    snapshotId,
-                    partition,
-                    bucket,
-                    files);
-        }
+        LOG.info(
+                "Store compact operator received record, snapshotId {}, partition {}, bucket {}, files {}",
+                snapshotId,
+                partition,
+                bucket,
+                files);
 
         if (write.streamingMode()) {
             write.notifyNewFiles(snapshotId, partition, bucket, files);
