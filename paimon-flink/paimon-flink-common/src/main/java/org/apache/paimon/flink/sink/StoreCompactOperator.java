@@ -31,6 +31,7 @@ import org.apache.paimon.options.Options;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.ChannelComputer;
 import org.apache.paimon.utils.Pair;
+import org.apache.paimon.utils.PartitionLogFormatter;
 import org.apache.paimon.utils.Preconditions;
 
 import org.apache.flink.runtime.jobgraph.OperatorID;
@@ -157,7 +158,7 @@ public class StoreCompactOperator extends PrepareCommitOperator<RowData, Committ
         LOG.info(
                 "Store compact operator received record, snapshotId {}, partition {}, bucket {}, files {}",
                 snapshotId,
-                partition,
+                PartitionLogFormatter.format(partition),
                 bucket,
                 files);
 
