@@ -164,6 +164,12 @@ public class CompactionMetrics {
 
         CompactTimer getCompactTimer();
 
+        /** Returns the partition this reporter is associated with, for logging purposes. */
+        BinaryRow getPartition();
+
+        /** Returns the bucket id this reporter is associated with, for logging purposes. */
+        int getBucket();
+
         void reportLevel0FileCount(long count);
 
         void reportCompactionTime(long time);
@@ -207,6 +213,16 @@ public class CompactionMetrics {
             return compactTimers.computeIfAbsent(
                     Thread.currentThread().getId(),
                     ignore -> new CompactTimer(BUSY_MEASURE_MILLIS));
+        }
+
+        @Override
+        public BinaryRow getPartition() {
+            return key.partition;
+        }
+
+        @Override
+        public int getBucket() {
+            return key.bucket;
         }
 
         @Override

@@ -21,6 +21,7 @@ package org.apache.paimon.compact;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.operation.metrics.CompactionMetrics;
 import org.apache.paimon.operation.metrics.MetricUtils;
+import org.apache.paimon.utils.PartitionLogFormatter;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -96,9 +97,18 @@ public abstract class CompactTask implements Callable<CompactResult> {
 
     protected String logMetric(
             long startMillis, List<DataFileMeta> compactBefore, List<DataFileMeta> compactAfter) {
+        String partitionAndBucket = "";
+        if (metricsReporter != null) {
+            partitionAndBucket =
+                    String.format(
+                            "partition={%s}, bucket=%d, ",
+                            PartitionLogFormatter.format(metricsReporter.getPartition()),
+                            metricsReporter.getBucket());
+        }
         return String.format(
-                "Done compacting %d files to %d files in %dms. "
+                "Done compacting %s%d files to %d files in %dms. "
                         + "Rewrite input file size = %d, output file size = %d",
+                partitionAndBucket,
                 compactBefore.size(),
                 compactAfter.size(),
                 System.currentTimeMillis() - startMillis,
