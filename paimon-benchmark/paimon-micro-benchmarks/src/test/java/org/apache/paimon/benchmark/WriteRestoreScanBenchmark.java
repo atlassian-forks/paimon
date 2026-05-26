@@ -72,7 +72,7 @@ import java.util.List;
  */
 public class WriteRestoreScanBenchmark extends TableBenchmark {
 
-    private static final int NUM_PARTITIONS = 1_000;
+    private static final int NUM_PARTITIONS = 5_000;
     private static final int ROWS_PER_PARTITION = 16;
     private static final int NUM_BUCKETS = 4;
     private static final int COMMIT_BATCH_PARTITIONS = 100;
@@ -95,6 +95,13 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
          * segmentsCacheDisabled:   Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
          * ----------------------------------------------------------------------------------------
          * restore                   12543 / 12605             0.3          3135816.3       1.0X
+         *
+         * Populated table: 5,000 partitions x 16 rows, bucket=4 -> 4,000 (partition, bucket) pairs
+         * OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
+         * Apple M4 Pro
+         * segmentsCacheDisabled:                       Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
+         * ------------------------------------------------------------------------------------------------------------
+         * OPERATORTEST_segmentsCacheDisabled_restore    174845 / 177212              0.1        8742263.3       1.0X
          */
     }
 
@@ -111,6 +118,13 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
          * segmentsCacheEnabled:    Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
          * ----------------------------------------------------------------------------------------
          * restore                     584 /  601             6.9           145985.1       1.0X
+         *
+         * Populated table: 5,000 partitions x 16 rows, bucket=4 -> 4,000 (partition, bucket) pairs
+         * OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
+         * Apple M4 Pro
+         * segmentsCacheEnabled:                         Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
+         * -------------------------------------------------------------------------------------------------------------
+         * OPERATORTEST_segmentsCacheEnabled_restore      142279 / 142700              0.1        7113951.4       1.0X
          */
     }
 
@@ -127,6 +141,13 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
          * prefetchEnabled:         Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
          * ----------------------------------------------------------------------------------------
          * restore                     619 /  627             6.5           154853.5       1.0X
+         *
+         * Populated table: 5,000 partitions x 16 rows, bucket=4 -> 4,000 (partition, bucket) pairs
+         * OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
+         * Apple M4 Pro
+         * prefetchEnabled:                        Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
+         * -------------------------------------------------------------------------------------------------------
+         * OPERATORTEST_prefetchEnabled_restore     10445 / 11463              1.9         522251.0       1.0X
          */
     }
 
