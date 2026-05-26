@@ -29,6 +29,7 @@ import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.manifest.BucketEntry;
 import org.apache.paimon.operation.FileSystemWriteRestore;
 import org.apache.paimon.options.CatalogOptions;
+import org.apache.paimon.options.MemorySize;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.table.FileStoreTable;
@@ -110,6 +111,8 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         Options catalogOptions = new Options();
         Options tableOptions = new Options();
         tableOptions.set(CoreOptions.MANIFEST_PREFETCH_ENTRIES, false);
+        catalogOptions.set(CatalogOptions.CACHE_MANIFEST_SMALL_FILE_MEMORY, MemorySize.ofMebiBytes(2048));
+        catalogOptions.set(CatalogOptions.CACHE_MANIFEST_MAX_MEMORY, MemorySize.ofMebiBytes(4096));
         innerTest("segmentsCacheEnabled", catalogOptions, tableOptions, false);
         /*
          * OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
@@ -119,12 +122,19 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
          * ----------------------------------------------------------------------------------------
          * restore                     584 /  601             6.9           145985.1       1.0X
          *
-         * Populated table: 5,000 partitions x 16 rows, bucket=4 -> 4,000 (partition, bucket) pairs
+         * Populated table: 5,000 partitions x 16 rows, bucket=4 -> 4,000 (partition, bucket) pairs, default memory
          * OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
          * Apple M4 Pro
          * segmentsCacheEnabled:                         Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
          * -------------------------------------------------------------------------------------------------------------
          * OPERATORTEST_segmentsCacheEnabled_restore      142279 / 142700              0.1        7113951.4       1.0X
+         *
+         * Populated table: 5,000 partitions x 16 rows, bucket=4 -> 4,000 (partition, bucket) pairs, cache memory 2GB/4GB
+         * OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
+         * Apple M4 Pro
+         * segmentsCacheEnabled:                       Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
+         * -----------------------------------------------------------------------------------------------------------
+         * OPERATORTEST_segmentsCacheEnabled_restore        2967 / 3001              6.7         148341.9       1.0X
          */
     }
 
@@ -145,9 +155,9 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
          * Populated table: 5,000 partitions x 16 rows, bucket=4 -> 4,000 (partition, bucket) pairs
          * OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
          * Apple M4 Pro
-         * prefetchEnabled:                        Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
-         * -------------------------------------------------------------------------------------------------------
-         * OPERATORTEST_prefetchEnabled_restore     10445 / 11463              1.9         522251.0       1.0X
+         * prefetchEnabled:                         Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
+         * --------------------------------------------------------------------------------------------------------
+         * OPERATORTEST_prefetchEnabled_restore         9714 / 10265              2.1         485704.0       1.0X
          */
     }
 
