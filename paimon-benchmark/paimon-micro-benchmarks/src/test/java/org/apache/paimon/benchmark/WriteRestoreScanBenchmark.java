@@ -51,14 +51,22 @@ import org.apache.commons.math3.random.RandomDataGenerator;
 import org.junit.jupiter.api.Test;
 import org.openjdk.jol.info.GraphLayout;
 
+import java.lang.management.ManagementFactory;
+import java.lang.management.MemoryPoolMXBean;
+import java.lang.management.MemoryType;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Benchmark for the {@link FileSystemWriteRestore#restoreFiles} hot loop.
+ * Benchmark for the {@link FileSystemWriteRestore#restoreFiles} hot loop, instrumented to surface
+ * the manifest-cache memory spike that writers can pay during cold cache population.
  *
  * <p>Builds a primary-key table with many partitions and a small number of rows per partition, then
  * enumerates every (partition, bucket) pair and invokes {@code restoreFiles} on each — the same
@@ -68,32 +76,65 @@ import java.util.List;
  * <ul>
  *   <li>{@code segmentsCacheDisabled} — no {@code SegmentsCache}, no prefetch. Cold disk reads
  *       every iteration; upper bound.
- *   <li>{@code segmentsCacheEnabled} — default catalog cache on, prefetch off. Each {@code
- *       restoreFiles} call goes through {@code ManifestFile.read} which consults {@code
- *       SegmentsCache}; warm after the first iteration.
+ *   <li>{@code segmentsCacheEnabled} — catalog cache on, prefetch off. Each {@code restoreFiles}
+ *       call goes through {@code ManifestFile.read} which consults {@code SegmentsCache}. With
+ *       per-iteration cache resets (see below) every measured iteration pays cold-populate cost.
  *   <li>{@code prefetchEnabled} — prefetch on. Each iteration pays a single bulk scan plus N
- *       in-memory filters. The static {@code prefetchedManifestEntriesCache} is invalidated between
- *       iterations via reflection so we measure cold-prefetch cost, not steady-state reuse.
+ *       in-memory filters. With per-iteration cache resets the static {@code
+ *       prefetchedManifestEntriesCache} is invalidated between iterations so we measure
+ *       cold-prefetch cost, not steady-state reuse.
  * </ul>
  *
- * <p>After the latency table, each arm also prints a {@code Manifest cache footprint} block with:
- * total manifest directory bytes on disk (split by {@code manifest-list-} / {@code manifest-} /
- * {@code index-manifest-} prefixes), {@link SegmentsCache#totalCacheBytes()} for the table's
- * manifest cache (when attached), and the JOL {@link GraphLayout} deep retained size of the static
- * {@code prefetchedManifestEntriesCache} entry for this table (when prefetch is on). The block also
- * prints SegmentsCache/disk and Prefetch/disk ratios so the in-memory expansion of a manifest
- * relative to its on-disk footprint is directly comparable across arms.
+ * <p>Spike-reproduction characteristics, applied uniformly to all arms:
+ *
+ * <ul>
+ *   <li>Caches that are in play (per the test's options) are <b>always</b> reset between
+ *       iterations. See {@link #resetCachesForIteration(FileStoreTable)} — the decision is derived
+ *       from {@code fst.getManifestCache() != null} and {@code
+ *       fst.coreOptions().prefetchManifestEntries()}, so no extra config flags are carried.
+ *   <li>Restore is driven by an {@link ExecutorService} with {@link #NUM_RESTORE_THREADS} threads,
+ *       each holding its own {@link FileSystemWriteRestore}. This is required because {@code
+ *       AbstractFileStoreScan} is stateful, and it matches a real Flink TM packed with multiple
+ *       writer subtasks restoring concurrently.
+ *   <li>Manifests are intentionally fragmented (small commit batches) and rows are widened (many
+ *       columns × bigger values) to make per-manifest stats sizes realistic.
+ *   <li>Per iteration we sample heap peak via {@link MemoryPoolMXBean#getPeakUsage()} and
+ *       post-{@code System.gc()} steady-state via {@link
+ *       java.lang.management.MemoryMXBean#getHeapMemoryUsage()}, and print the full {@code Manifest
+ *       cache footprint} block — including {@code Peak/Steady} (the "spike multiplier") — at the
+ *       end of each iteration. A one-line aggregate over the measured iterations is printed after
+ *       the benchmark completes.
+ * </ul>
  */
 public class WriteRestoreScanBenchmark extends TableBenchmark {
 
-    private static final int NUM_PARTITIONS = 5_000;
-    private static final int ROWS_PER_PARTITION = 16;
-    private static final int NUM_BUCKETS = 4;
-    private static final int COMMIT_BATCH_PARTITIONS = 100;
-    private static final int VALUE_COUNT = 5;
+    /**
+     * Default parallelism for the restore worker pool. Bumping this approximates packing more Flink
+     * writer subtasks onto a single TM.
+     */
+    private static final int NUM_RESTORE_THREADS = 8;
 
-    private static final int NUM_WARMUP_ITERS = 1;
-    private static final int NUM_MEASURED_ITERS = 3;
+    /** All tunables for one benchmark run. Defaults match the pre-spike-knobs version. */
+    private static final class BenchParams {
+        int numPartitions = 1_000;
+        int rowsPerPartition = 16;
+        int numBuckets = 4;
+
+        /** Smaller -> more, smaller manifest files (fragmentation). */
+        int commitBatchPartitions = 10;
+
+        /** Number of value columns; widens DataFileMeta stats per manifest entry. */
+        int valueCount = 10;
+
+        /** Length of each random hex value string; widens per-stat min/max blobs. */
+        int valueCharCount = 64;
+
+        /** Parallelism for the restore worker pool. */
+        int numRestoreThreads = NUM_RESTORE_THREADS;
+
+        int numWarmupIters = 1;
+        int numMeasuredIters = 3;
+    }
 
     @Test
     public void testRestoreFiles_segmentsCacheDisabled() throws Exception {
@@ -101,8 +142,12 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         catalogOptions.set(CatalogOptions.CACHE_ENABLED, false);
         Options tableOptions = new Options();
         tableOptions.set(CoreOptions.MANIFEST_PREFETCH_ENTRIES, false);
-        innerTest("segmentsCacheDisabled", catalogOptions, tableOptions, false);
+
+        BenchParams p = new BenchParams();
+        innerTest("segmentsCacheDisabled", catalogOptions, tableOptions, p);
         /*
+         * HISTORICAL REFERENCE (pre-spike-knobs values; current runs will differ):
+         *
          * OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
          * Apple M4 Pro
          * Populated table: 1,000 partitions x 16 rows, bucket=4 -> 4,000 (partition, bucket) pairs
@@ -127,8 +172,20 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         catalogOptions.set(
                 CatalogOptions.CACHE_MANIFEST_SMALL_FILE_MEMORY, MemorySize.ofMebiBytes(2048));
         catalogOptions.set(CatalogOptions.CACHE_MANIFEST_MAX_MEMORY, MemorySize.ofMebiBytes(4096));
-        innerTest("segmentsCacheEnabled", catalogOptions, tableOptions, false);
+
+        BenchParams p = new BenchParams();
+        innerTest("segmentsCacheEnabled", catalogOptions, tableOptions, p);
         /*
+         * HISTORICAL REFERENCE (pre-spike-knobs values; the new arm pays cold-populate cost every
+         * iteration, so the new numbers will be substantially higher):
+         *
+         * OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
+         * Apple M4 Pro
+         * Populated table: 1,000 partitions x 16 rows, bucket=4 -> 4,000 (partition, bucket) pairs
+         * segmentsCacheEnabled:    Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
+         * ----------------------------------------------------------------------------------------
+         * restore                     584 /  601             6.9           145985.1       1.0X
+         *
          * Populated table: 5,000 partitions x 16 rows, bucket=4 -> 4,000 (partition, bucket) pairs, default memory
          * OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
          * Apple M4 Pro
@@ -142,12 +199,6 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
          * segmentsCacheEnabled:                       Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
          * -----------------------------------------------------------------------------------------------------------
          * OPERATORTEST_segmentsCacheEnabled_restore        2967 / 3001              6.7         148341.9       1.0X
-         *
-         * Manifest cache footprint (segmentsCacheEnabled):
-         *  Disk          manifests=2,142,579 bytes (21 files), manifest-lists=24,755 bytes (20 files), index-manifests=0 bytes (0 files); total=2,167,334 bytes
-         *  Segmen *tsCache bytes=33,158,618 (estimatedSize=151, maxMemory=4 gb, maxElementSize=9223372036854775807)
-         *  Prefet *ch n/a (prefetch disabled or prefetchedManifestEntriesCache empty for this table)
-         *  Ratios *        SegmentsCache/disk=15.30x, Prefetch/disk=n/a
          */
     }
 
@@ -157,31 +208,32 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         catalogOptions.set(CatalogOptions.CACHE_ENABLED, false);
         Options tableOptions = new Options();
         tableOptions.set(CoreOptions.MANIFEST_PREFETCH_ENTRIES, true);
-        innerTest("prefetchEnabled", catalogOptions, tableOptions, true);
+
+        BenchParams p = new BenchParams();
+        innerTest("prefetchEnabled", catalogOptions, tableOptions, p);
         /*
+         * HISTORICAL REFERENCE (pre-spike-knobs values; current runs will differ):
+         *
+         * OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
+         * Apple M4 Pro
+         * Populated table: 1,000 partitions x 16 rows, bucket=4 -> 4,000 (partition, bucket) pairs
+         * prefetchEnabled:         Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
+         * ----------------------------------------------------------------------------------------
+         * restore                     619 /  627             6.5           154853.5       1.0X
+         *
          * Populated table: 5,000 partitions x 16 rows, bucket=4 -> 4,000 (partition, bucket) pairs
          * OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
          * Apple M4 Pro
          * prefetchEnabled:                         Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
          * --------------------------------------------------------------------------------------------------------
          * OPERATORTEST_prefetchEnabled_restore         9714 / 10265              2.1         485704.0       1.0X
-         *
-         * Manifest cache footprint (prefetchEnabled):
-         * Disk          manifests=2,108,133 bytes (21 files), manifest-lists=24,796 bytes (20 files), index-manifests=0 bytes (0 files); total=2,132,929 bytes
-         * SegmentsCache n/a (no manifest cache attached to table — cache disabled)
-         * Prefetch bytes=53,833,096 (entries=20000, deep-size via JOL GraphLayout)
-         * Ratios        SegmentsCache/disk=n/a, Prefetch/disk=25.24x
          */
     }
 
-    private void innerTest(
-            String name,
-            Options catalogOptions,
-            Options tableOptions,
-            boolean clearStaticPrefetchCacheBetweenIters)
+    private void innerTest(String name, Options catalogOptions, Options tableOptions, BenchParams p)
             throws Exception {
-        Table table = createPartitionedTable(catalogOptions, tableOptions, "T");
-        populateTable(table);
+        Table table = createPartitionedTable(catalogOptions, tableOptions, "T", p);
+        populateTable(table, p);
 
         FileStoreTable fst = (FileStoreTable) table;
         List<BucketEntry> bucketEntries = fst.newSnapshotReader().bucketEntries();
@@ -189,42 +241,112 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
                 "Populated table has "
                         + bucketEntries.size()
                         + " (partition, bucket) pairs across "
-                        + NUM_PARTITIONS
-                        + " partitions.");
+                        + p.numPartitions
+                        + " partitions ("
+                        + p.numRestoreThreads
+                        + " restore threads, "
+                        + p.valueCount
+                        + "x value cols, "
+                        + p.valueCharCount
+                        + "-char values, commit batch="
+                        + p.commitBatchPartitions
+                        + ").");
 
         long valuesPerIteration = bucketEntries.size();
-        Benchmark benchmark =
-                new Benchmark(name, valuesPerIteration)
-                        .setNumWarmupIters(NUM_WARMUP_ITERS)
-                        .setOutputPerIteration(true);
-        benchmark.addCase(
-                "restore",
-                NUM_MEASURED_ITERS,
-                () -> {
-                    if (clearStaticPrefetchCacheBetweenIters) {
+        ExecutorService executor = Executors.newFixedThreadPool(p.numRestoreThreads);
+        AtomicInteger iterCounter = new AtomicInteger(0);
+        List<long[]> perIterHeap = new ArrayList<>(p.numWarmupIters + p.numMeasuredIters);
+
+        try {
+            Benchmark benchmark =
+                    new Benchmark(name, valuesPerIteration)
+                            .setNumWarmupIters(p.numWarmupIters)
+                            .setOutputPerIteration(true);
+            benchmark.addCase(
+                    "restore",
+                    p.numMeasuredIters,
+                    () -> {
+                        int iter = iterCounter.getAndIncrement();
+                        String iterLabel =
+                                iter < p.numWarmupIters
+                                        ? "warmup-" + iter
+                                        : "iter-" + (iter - p.numWarmupIters);
+
                         try {
-                            clearStaticPrefetchCache();
+                            resetCachesForIteration(fst);
                         } catch (Exception e) {
                             throw new RuntimeException(e);
                         }
-                    }
-                    FileSystemWriteRestore restore =
-                            new FileSystemWriteRestore(
-                                    fst.coreOptions(),
-                                    fst.snapshotManager(),
-                                    fst.store().newScan(),
-                                    fst.store().newIndexFileHandler());
-                    for (BucketEntry entry : bucketEntries) {
-                        restore.restoreFiles(entry.partition(), entry.bucket(), false, false);
-                    }
-                });
-        benchmark.run();
 
-        printCacheFootprint(name, fst);
+                        // Fresh ThreadLocal each iteration so the first worker access constructs a
+                        // fresh FileSystemWriteRestore + scan that observes the just-reset cache.
+                        // (AbstractFileStoreScan is stateful, so one FSWR per thread is required.)
+                        ThreadLocal<FileSystemWriteRestore> threadLocalRestore =
+                                ThreadLocal.withInitial(
+                                        () ->
+                                                new FileSystemWriteRestore(
+                                                        fst.coreOptions(),
+                                                        fst.snapshotManager(),
+                                                        fst.store().newScan(),
+                                                        fst.store().newIndexFileHandler()));
+
+                        for (MemoryPoolMXBean pool : ManagementFactory.getMemoryPoolMXBeans()) {
+                            if (pool.getType() == MemoryType.HEAP) {
+                                pool.resetPeakUsage();
+                            }
+                        }
+
+                        List<Future<?>> futures = new ArrayList<>(bucketEntries.size());
+                        for (BucketEntry entry : bucketEntries) {
+                            futures.add(
+                                    executor.submit(
+                                            () ->
+                                                    threadLocalRestore
+                                                            .get()
+                                                            .restoreFiles(
+                                                                    entry.partition(),
+                                                                    entry.bucket(),
+                                                                    false,
+                                                                    false)));
+                        }
+                        for (Future<?> f : futures) {
+                            try {
+                                f.get();
+                            } catch (Exception e) {
+                                throw new RuntimeException(e);
+                            }
+                        }
+
+                        long peak = 0;
+                        for (MemoryPoolMXBean pool : ManagementFactory.getMemoryPoolMXBeans()) {
+                            if (pool.getType() == MemoryType.HEAP) {
+                                peak += pool.getPeakUsage().getUsed();
+                            }
+                        }
+                        System.gc();
+                        System.runFinalization();
+                        System.gc();
+                        long steady =
+                                ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getUsed();
+                        perIterHeap.add(new long[] {peak, steady});
+
+                        try {
+                            printCacheFootprint(name + " " + iterLabel, fst, peak, steady);
+                        } catch (Exception e) {
+                            throw new RuntimeException(e);
+                        }
+                    });
+            benchmark.run();
+        } finally {
+            executor.shutdownNow();
+        }
+
+        printAggregateHeap(name, p, perIterHeap);
     }
 
     private Table createPartitionedTable(
-            Options catalogOptions, Options tableOptions, String tableName) throws Exception {
+            Options catalogOptions, Options tableOptions, String tableName, BenchParams p)
+            throws Exception {
         catalogOptions.set(CatalogOptions.WAREHOUSE, tempFile.toUri().toString());
         Catalog catalog = CatalogFactory.createCatalog(CatalogContext.create(catalogOptions));
         String database = "default";
@@ -233,11 +355,11 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         List<DataField> fields = new ArrayList<>();
         fields.add(new DataField(0, "pt", new IntType()));
         fields.add(new DataField(1, "k", new IntType()));
-        for (int i = 0; i < VALUE_COUNT; i++) {
+        for (int i = 0; i < p.valueCount; i++) {
             fields.add(new DataField(2 + i, "f" + i, DataTypes.STRING()));
         }
 
-        tableOptions.set(CoreOptions.BUCKET, NUM_BUCKETS);
+        tableOptions.set(CoreOptions.BUCKET, p.numBuckets);
         tableOptions.set(CoreOptions.WRITE_ONLY, false);
         tableOptions.set(CoreOptions.SNAPSHOT_NUM_RETAINED_MAX, 10);
 
@@ -254,18 +376,18 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         return catalog.getTable(identifier);
     }
 
-    private void populateTable(Table table) throws Exception {
+    private void populateTable(Table table, BenchParams p) throws Exception {
         BatchWriteBuilder writeBuilder = table.newBatchWriteBuilder();
         RandomDataGenerator random = new RandomDataGenerator();
         for (int batchStart = 0;
-                batchStart < NUM_PARTITIONS;
-                batchStart += COMMIT_BATCH_PARTITIONS) {
-            int batchEnd = Math.min(batchStart + COMMIT_BATCH_PARTITIONS, NUM_PARTITIONS);
+                batchStart < p.numPartitions;
+                batchStart += p.commitBatchPartitions) {
+            int batchEnd = Math.min(batchStart + p.commitBatchPartitions, p.numPartitions);
             try (BatchTableWrite write = writeBuilder.newWrite();
                     BatchTableCommit commit = writeBuilder.newCommit()) {
                 for (int pt = batchStart; pt < batchEnd; pt++) {
-                    for (int k = 0; k < ROWS_PER_PARTITION; k++) {
-                        write.write(makeRow(pt, k, random));
+                    for (int k = 0; k < p.rowsPerPartition; k++) {
+                        write.write(makeRow(pt, k, random, p));
                     }
                 }
                 commit.commit(write.prepareCommit());
@@ -273,23 +395,20 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         }
     }
 
-    private InternalRow makeRow(int pt, int k, RandomDataGenerator random) {
-        GenericRow row = new GenericRow(2 + VALUE_COUNT);
+    private InternalRow makeRow(int pt, int k, RandomDataGenerator random, BenchParams p) {
+        GenericRow row = new GenericRow(2 + p.valueCount);
         row.setField(0, pt);
         row.setField(1, k);
-        for (int i = 0; i < VALUE_COUNT; i++) {
-            row.setField(2 + i, BinaryString.fromString(random.nextHexString(10)));
+        for (int i = 0; i < p.valueCount; i++) {
+            row.setField(2 + i, BinaryString.fromString(random.nextHexString(p.valueCharCount)));
         }
         return row;
     }
 
     /**
      * Invalidate {@link FileSystemWriteRestore}'s private static {@code
-     * prefetchedManifestEntriesCache} via reflection. Without this, every iteration of the prefetch
-     * arm after the first would just re-filter the cached entries — a real production steady-state,
-     * but it would make the 3-iteration Best/Avg block misleading. Clearing per iteration measures
-     * the cold-prefetch cost (one bulk scan + N filters) the way the writer pays it on a
-     * freshly-scheduled task.
+     * prefetchedManifestEntriesCache} via reflection. Used by {@link
+     * #resetCachesForIteration(FileStoreTable)} when the table opts into prefetch.
      */
     private static void clearStaticPrefetchCache() throws Exception {
         Field f = FileSystemWriteRestore.class.getDeclaredField("prefetchedManifestEntriesCache");
@@ -301,10 +420,39 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
     }
 
     /**
-     * Print a compact footprint summary for one benchmark arm: total manifest directory bytes on
-     * disk (split by file-name prefix), the table's {@link SegmentsCache} accounting bytes, and the
-     * JOL deep retained size of the prefetched manifest entries for this table — plus
-     * memory-to-disk ratios so each arm's in-memory expansion is directly comparable.
+     * Reset whichever manifest caches are in play for this table, derived from the options the test
+     * already configured. Always called at the start of every iteration so each measured iteration
+     * pays the cold-populate cost (the production-onset condition we're trying to reproduce).
+     *
+     * <ul>
+     *   <li>SegmentsCache (per-table, attached by {@code CachingCatalog.putTableCache} when {@code
+     *       CACHE_ENABLED=true}): if attached, replace with a fresh instance preserving {@code
+     *       maxMemorySize} / {@code maxElementSize}. Replacing (rather than {@code
+     *       invalidateAll()}-ing) sidesteps Caffeine's asynchronous eviction so the cold state is
+     *       deterministic.
+     *   <li>Prefetch cache (static in {@link FileSystemWriteRestore}, populated when {@code
+     *       CoreOptions.MANIFEST_PREFETCH_ENTRIES} is true): invalidate all entries.
+     * </ul>
+     *
+     * <p>Both branches are no-ops when the corresponding cache isn't enabled, so this single call
+     * site works for all benchmark arms — no per-test config flags required.
+     */
+    private static void resetCachesForIteration(FileStoreTable fst) throws Exception {
+        SegmentsCache<Path> original = fst.getManifestCache();
+        if (original != null) {
+            fst.setManifestCache(
+                    SegmentsCache.create(original.maxMemorySize(), original.maxElementSize()));
+        }
+        if (fst.coreOptions().prefetchManifestEntries()) {
+            clearStaticPrefetchCache();
+        }
+    }
+
+    /**
+     * Print a per-iteration footprint summary: total manifest directory bytes on disk (split by
+     * file-name prefix), the table's {@link SegmentsCache} accounting bytes, the JOL deep retained
+     * size of the prefetched manifest entries for this table, the just-sampled heap peak and
+     * post-GC steady-state, and memory-to-disk plus {@code Peak/Steady} (spike multiplier) ratios.
      *
      * <p>Caveats:
      *
@@ -316,12 +464,16 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
      *       (snapshot, partitionType, every {@code BinaryRow} partition, the {@code
      *       PartitionBucketMapping}, etc.). That's the right number for "what's actually held in
      *       heap" but it is not what a Caffeine weigher would report.
+     *   <li>Peak is per-pool sum: {@code MemoryPoolMXBean.getPeakUsage()} is per-pool and peaks
+     *       don't necessarily coincide across pools; summing slightly overcounts. Accurate enough
+     *       for order-of-magnitude spike comparison.
      *   <li>The prefetch reading uses {@link #lookupPrefetchedForTable} which filters by this
      *       table's path — the static cache may contain entries from prior {@code @Test} methods in
      *       the same JVM.
      * </ul>
      */
-    private void printCacheFootprint(String name, FileStoreTable fst) throws Exception {
+    private void printCacheFootprint(String label, FileStoreTable fst, long peak, long steady)
+            throws Exception {
         Path manifestDir = new Path(fst.snapshotManager().tablePath(), "manifest");
         FileStatus[] statuses = fst.snapshotManager().fileIO().listStatus(manifestDir);
         long manifestBytes = 0;
@@ -380,7 +532,7 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         }
 
         System.out.println();
-        System.out.println("Manifest cache footprint (" + name + "):");
+        System.out.println("Manifest cache footprint (" + label + "):");
         System.out.printf(
                 "  Disk          manifests=%,d bytes (%d files), manifest-lists=%,d bytes (%d files), index-manifests=%,d bytes (%d files); total=%,d bytes%n",
                 manifestBytes,
@@ -392,18 +544,66 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
                 diskTotal);
         System.out.println("  " + segmentsCacheLine);
         System.out.println("  " + prefetchLine);
+        System.out.printf("  Heap          peak=%,d bytes, steady=%,d bytes%n", peak, steady);
         if (diskTotal > 0) {
-            String scRatio =
-                    segmentsCacheBytes == null
-                            ? "n/a"
-                            : String.format("%.2fx", (double) segmentsCacheBytes / diskTotal);
-            String pfRatio =
-                    prefetchBytes == null
-                            ? "n/a"
-                            : String.format("%.2fx", (double) prefetchBytes / diskTotal);
             System.out.printf(
-                    "  Ratios        SegmentsCache/disk=%s, Prefetch/disk=%s%n", scRatio, pfRatio);
+                    "  Ratios        SegmentsCache/disk=%s, Prefetch/disk=%s, Peak/disk=%s, Steady/disk=%s, Peak/Steady=%s%n",
+                    ratio(segmentsCacheBytes, diskTotal),
+                    ratio(prefetchBytes, diskTotal),
+                    ratio(peak, diskTotal),
+                    ratio(steady, diskTotal),
+                    ratio(peak, steady));
         }
+        System.out.println();
+    }
+
+    /**
+     * Print a one-block aggregate over the <b>measured</b> iterations (the warmup iterations are
+     * skipped). The {@code Peak/Steady} max is the worst-case "spike multiplier" observed during
+     * this run.
+     */
+    private void printAggregateHeap(String name, BenchParams p, List<long[]> perIterHeap) {
+        int start = p.numWarmupIters;
+        int end = perIterHeap.size();
+        if (start >= end) {
+            return;
+        }
+
+        long peakSum = 0;
+        long peakMin = Long.MAX_VALUE;
+        long peakMax = Long.MIN_VALUE;
+        long steadySum = 0;
+        long steadyMin = Long.MAX_VALUE;
+        long steadyMax = Long.MIN_VALUE;
+        double ratioSum = 0;
+        double ratioMax = 0;
+        int n = end - start;
+        for (int i = start; i < end; i++) {
+            long peak = perIterHeap.get(i)[0];
+            long steady = perIterHeap.get(i)[1];
+            peakSum += peak;
+            peakMin = Math.min(peakMin, peak);
+            peakMax = Math.max(peakMax, peak);
+            steadySum += steady;
+            steadyMin = Math.min(steadyMin, steady);
+            steadyMax = Math.max(steadyMax, steady);
+            double r = steady == 0 ? 0 : (double) peak / steady;
+            ratioSum += r;
+            ratioMax = Math.max(ratioMax, r);
+        }
+
+        System.out.println();
+        System.out.println(
+                "Manifest cache footprint aggregate (" + name + ", " + n + " measured iters):");
+        System.out.printf(
+                "  Heap          peak   avg=%,d bytes, min=%,d, max=%,d%n",
+                peakSum / n, peakMin, peakMax);
+        System.out.printf(
+                "  Heap          steady avg=%,d bytes, min=%,d, max=%,d%n",
+                steadySum / n, steadyMin, steadyMax);
+        System.out.printf(
+                "  Heap          peak/steady avg=%.2fx (max spike multiplier=%.2fx)%n",
+                ratioSum / n, ratioMax);
         System.out.println();
     }
 
@@ -424,5 +624,19 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
             return null;
         }
         return c.asMap().get(tableKey);
+    }
+
+    private static String ratio(Long num, long denom) {
+        if (num == null || denom == 0) {
+            return "n/a";
+        }
+        return String.format("%.2fx", (double) num / denom);
+    }
+
+    private static String ratio(long num, long denom) {
+        if (denom == 0) {
+            return "n/a";
+        }
+        return String.format("%.2fx", (double) num / denom);
     }
 }
