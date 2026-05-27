@@ -26,6 +26,8 @@ import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.fs.FileStatus;
+import org.apache.paimon.fs.Path;
 import org.apache.paimon.manifest.BucketEntry;
 import org.apache.paimon.operation.FileSystemWriteRestore;
 import org.apache.paimon.options.CatalogOptions;
@@ -40,11 +42,14 @@ import org.apache.paimon.table.sink.BatchWriteBuilder;
 import org.apache.paimon.types.DataField;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.types.IntType;
+import org.apache.paimon.utils.FileStorePathFactory;
+import org.apache.paimon.utils.SegmentsCache;
 
 import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Cache;
 
 import org.apache.commons.math3.random.RandomDataGenerator;
 import org.junit.jupiter.api.Test;
+import org.openjdk.jol.info.GraphLayout;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -70,6 +75,14 @@ import java.util.List;
  *       in-memory filters. The static {@code prefetchedManifestEntriesCache} is invalidated between
  *       iterations via reflection so we measure cold-prefetch cost, not steady-state reuse.
  * </ul>
+ *
+ * <p>After the latency table, each arm also prints a {@code Manifest cache footprint} block with:
+ * total manifest directory bytes on disk (split by {@code manifest-list-} / {@code manifest-} /
+ * {@code index-manifest-} prefixes), {@link SegmentsCache#totalCacheBytes()} for the table's
+ * manifest cache (when attached), and the JOL {@link GraphLayout} deep retained size of the static
+ * {@code prefetchedManifestEntriesCache} entry for this table (when prefetch is on). The block also
+ * prints SegmentsCache/disk and Prefetch/disk ratios so the in-memory expansion of a manifest
+ * relative to its on-disk footprint is directly comparable across arms.
  */
 public class WriteRestoreScanBenchmark extends TableBenchmark {
 
@@ -111,17 +124,11 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         Options catalogOptions = new Options();
         Options tableOptions = new Options();
         tableOptions.set(CoreOptions.MANIFEST_PREFETCH_ENTRIES, false);
-        catalogOptions.set(CatalogOptions.CACHE_MANIFEST_SMALL_FILE_MEMORY, MemorySize.ofMebiBytes(2048));
+        catalogOptions.set(
+                CatalogOptions.CACHE_MANIFEST_SMALL_FILE_MEMORY, MemorySize.ofMebiBytes(2048));
         catalogOptions.set(CatalogOptions.CACHE_MANIFEST_MAX_MEMORY, MemorySize.ofMebiBytes(4096));
         innerTest("segmentsCacheEnabled", catalogOptions, tableOptions, false);
         /*
-         * OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
-         * Apple M4 Pro
-         * Populated table: 1,000 partitions x 16 rows, bucket=4 -> 4,000 (partition, bucket) pairs
-         * segmentsCacheEnabled:    Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
-         * ----------------------------------------------------------------------------------------
-         * restore                     584 /  601             6.9           145985.1       1.0X
-         *
          * Populated table: 5,000 partitions x 16 rows, bucket=4 -> 4,000 (partition, bucket) pairs, default memory
          * OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
          * Apple M4 Pro
@@ -135,29 +142,35 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
          * segmentsCacheEnabled:                       Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
          * -----------------------------------------------------------------------------------------------------------
          * OPERATORTEST_segmentsCacheEnabled_restore        2967 / 3001              6.7         148341.9       1.0X
+         *
+         * Manifest cache footprint (segmentsCacheEnabled):
+         *  Disk          manifests=2,142,579 bytes (21 files), manifest-lists=24,755 bytes (20 files), index-manifests=0 bytes (0 files); total=2,167,334 bytes
+         *  Segmen *tsCache bytes=33,158,618 (estimatedSize=151, maxMemory=4 gb, maxElementSize=9223372036854775807)
+         *  Prefet *ch n/a (prefetch disabled or prefetchedManifestEntriesCache empty for this table)
+         *  Ratios *        SegmentsCache/disk=15.30x, Prefetch/disk=n/a
          */
     }
 
     @Test
     public void testRestoreFiles_prefetchEnabled() throws Exception {
         Options catalogOptions = new Options();
+        catalogOptions.set(CatalogOptions.CACHE_ENABLED, false);
         Options tableOptions = new Options();
         tableOptions.set(CoreOptions.MANIFEST_PREFETCH_ENTRIES, true);
         innerTest("prefetchEnabled", catalogOptions, tableOptions, true);
         /*
-         * OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
-         * Apple M4 Pro
-         * Populated table: 1,000 partitions x 16 rows, bucket=4 -> 4,000 (partition, bucket) pairs
-         * prefetchEnabled:         Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
-         * ----------------------------------------------------------------------------------------
-         * restore                     619 /  627             6.5           154853.5       1.0X
-         *
          * Populated table: 5,000 partitions x 16 rows, bucket=4 -> 4,000 (partition, bucket) pairs
          * OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
          * Apple M4 Pro
          * prefetchEnabled:                         Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
          * --------------------------------------------------------------------------------------------------------
          * OPERATORTEST_prefetchEnabled_restore         9714 / 10265              2.1         485704.0       1.0X
+         *
+         * Manifest cache footprint (prefetchEnabled):
+         * Disk          manifests=2,108,133 bytes (21 files), manifest-lists=24,796 bytes (20 files), index-manifests=0 bytes (0 files); total=2,132,929 bytes
+         * SegmentsCache n/a (no manifest cache attached to table — cache disabled)
+         * Prefetch bytes=53,833,096 (entries=20000, deep-size via JOL GraphLayout)
+         * Ratios        SegmentsCache/disk=n/a, Prefetch/disk=25.24x
          */
     }
 
@@ -206,6 +219,8 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
                     }
                 });
         benchmark.run();
+
+        printCacheFootprint(name, fst);
     }
 
     private Table createPartitionedTable(
@@ -283,5 +298,131 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         if (c != null) {
             c.invalidateAll();
         }
+    }
+
+    /**
+     * Print a compact footprint summary for one benchmark arm: total manifest directory bytes on
+     * disk (split by file-name prefix), the table's {@link SegmentsCache} accounting bytes, and the
+     * JOL deep retained size of the prefetched manifest entries for this table — plus
+     * memory-to-disk ratios so each arm's in-memory expansion is directly comparable.
+     *
+     * <p>Caveats:
+     *
+     * <ul>
+     *   <li>{@link SegmentsCache#totalCacheBytes()} walks {@code cache.asMap()} and re-applies the
+     *       weigher per entry — it's an O(N) snapshot, fine here but not a free read.
+     *   <li>{@link GraphLayout#parseInstance} walks the entire reachable object graph from the
+     *       {@code PrefetchedManifestEntries} root, so it includes everything transitively retained
+     *       (snapshot, partitionType, every {@code BinaryRow} partition, the {@code
+     *       PartitionBucketMapping}, etc.). That's the right number for "what's actually held in
+     *       heap" but it is not what a Caffeine weigher would report.
+     *   <li>The prefetch reading uses {@link #lookupPrefetchedForTable} which filters by this
+     *       table's path — the static cache may contain entries from prior {@code @Test} methods in
+     *       the same JVM.
+     * </ul>
+     */
+    private void printCacheFootprint(String name, FileStoreTable fst) throws Exception {
+        Path manifestDir = new Path(fst.snapshotManager().tablePath(), "manifest");
+        FileStatus[] statuses = fst.snapshotManager().fileIO().listStatus(manifestDir);
+        long manifestBytes = 0;
+        long manifestListBytes = 0;
+        long indexManifestBytes = 0;
+        int manifestCount = 0;
+        int manifestListCount = 0;
+        int indexManifestCount = 0;
+        for (FileStatus s : statuses) {
+            String fileName = s.getPath().getName();
+            // INDEX_MANIFEST_PREFIX and MANIFEST_LIST_PREFIX both start with "manifest-",
+            // so the more specific prefixes must be checked first.
+            if (fileName.startsWith(FileStorePathFactory.INDEX_MANIFEST_PREFIX)) {
+                indexManifestBytes += s.getLen();
+                indexManifestCount++;
+            } else if (fileName.startsWith(FileStorePathFactory.MANIFEST_LIST_PREFIX)) {
+                manifestListBytes += s.getLen();
+                manifestListCount++;
+            } else if (fileName.startsWith(FileStorePathFactory.MANIFEST_PREFIX)) {
+                manifestBytes += s.getLen();
+                manifestCount++;
+            }
+        }
+        long diskTotal = manifestBytes + manifestListBytes + indexManifestBytes;
+
+        SegmentsCache<Path> sc = fst.getManifestCache();
+        Long segmentsCacheBytes = sc == null ? null : sc.totalCacheBytes();
+        String segmentsCacheLine;
+        if (sc == null) {
+            segmentsCacheLine =
+                    "SegmentsCache n/a (no manifest cache attached to table — cache disabled)";
+        } else {
+            segmentsCacheLine =
+                    String.format(
+                            "SegmentsCache bytes=%,d (estimatedSize=%d, maxMemory=%s, maxElementSize=%d)",
+                            segmentsCacheBytes,
+                            sc.estimatedSize(),
+                            sc.maxMemorySize(),
+                            sc.maxElementSize());
+        }
+
+        String tableKey = fst.snapshotManager().tablePath().toString();
+        FileSystemWriteRestore.PrefetchedManifestEntries prefetched =
+                lookupPrefetchedForTable(tableKey);
+        Long prefetchBytes = null;
+        String prefetchLine;
+        if (prefetched == null) {
+            prefetchLine =
+                    "Prefetch n/a (prefetch disabled or prefetchedManifestEntriesCache empty for this table)";
+        } else {
+            prefetchBytes = GraphLayout.parseInstance(prefetched).totalSize();
+            prefetchLine =
+                    String.format(
+                            "Prefetch bytes=%,d (entries=%d, deep-size via JOL GraphLayout)",
+                            prefetchBytes, prefetched.manifestEntries().size());
+        }
+
+        System.out.println();
+        System.out.println("Manifest cache footprint (" + name + "):");
+        System.out.printf(
+                "  Disk          manifests=%,d bytes (%d files), manifest-lists=%,d bytes (%d files), index-manifests=%,d bytes (%d files); total=%,d bytes%n",
+                manifestBytes,
+                manifestCount,
+                manifestListBytes,
+                manifestListCount,
+                indexManifestBytes,
+                indexManifestCount,
+                diskTotal);
+        System.out.println("  " + segmentsCacheLine);
+        System.out.println("  " + prefetchLine);
+        if (diskTotal > 0) {
+            String scRatio =
+                    segmentsCacheBytes == null
+                            ? "n/a"
+                            : String.format("%.2fx", (double) segmentsCacheBytes / diskTotal);
+            String pfRatio =
+                    prefetchBytes == null
+                            ? "n/a"
+                            : String.format("%.2fx", (double) prefetchBytes / diskTotal);
+            System.out.printf(
+                    "  Ratios        SegmentsCache/disk=%s, Prefetch/disk=%s%n", scRatio, pfRatio);
+        }
+        System.out.println();
+    }
+
+    /**
+     * Reflectively read {@link FileSystemWriteRestore}'s private static {@code
+     * prefetchedManifestEntriesCache} and return the entry keyed by {@code tableKey}, or {@code
+     * null} if absent. The static cache is shared across {@code @Test} methods in the same JVM, so
+     * filtering by this table's path is required.
+     */
+    private static FileSystemWriteRestore.PrefetchedManifestEntries lookupPrefetchedForTable(
+            String tableKey) throws Exception {
+        Field f = FileSystemWriteRestore.class.getDeclaredField("prefetchedManifestEntriesCache");
+        f.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        Cache<String, FileSystemWriteRestore.PrefetchedManifestEntries> c =
+                (Cache<String, FileSystemWriteRestore.PrefetchedManifestEntries>) f.get(null);
+        if (c == null) {
+            return null;
+        }
+        return c.asMap().get(tableKey);
     }
 }
