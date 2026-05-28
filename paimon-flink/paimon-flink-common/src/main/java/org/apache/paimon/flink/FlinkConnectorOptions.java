@@ -517,12 +517,26 @@ public class FlinkConnectorOptions {
                     .withDescription(
                             "Controls the cache memory of writer coordinator to cache manifest files in Job Manager.");
 
+    public static final ConfigOption<MemorySize> SINK_WRITER_COORDINATOR_CACHE_PAGE_SIZE =
+            key("sink.writer-coordinator.cache-page-size")
+                    .memoryType()
+                    .defaultValue(CoreOptions.PAGE_SIZE.defaultValue())
+                    .withDescription(
+                            "Memory page size for the writer coordinator manifest cache (the SegmentsCache "
+                                    + "attached to the table inside the Job Manager). Smaller pages reduce "
+                                    + "per-entry tail-padding overhead and lower peak heap during cold-cache "
+                                    + "fill, at the cost of more MemorySegment objects per cached manifest. "
+                                    + "Distinct from 'sink.writer-coordinator.page-size', which controls "
+                                    + "RPC response chunking, not the manifest cache layout.");
+
     public static final ConfigOption<MemorySize> SINK_WRITER_COORDINATOR_PAGE_SIZE =
             key("sink.writer-coordinator.page-size")
                     .memoryType()
                     .defaultValue(MemorySize.ofKibiBytes(32))
                     .withDescription(
-                            "Controls the page size for one RPC request of writer coordinator.");
+                            "Controls the page size for one RPC request of writer coordinator. "
+                                    + "Distinct from 'sink.writer-coordinator.cache-page-size', which "
+                                    + "controls the manifest cache memory layout, not RPC chunking.");
 
     public static final ConfigOption<Boolean> FILESYSTEM_JOB_LEVEL_SETTINGS_ENABLED =
             key("filesystem.job-level-settings.enabled")

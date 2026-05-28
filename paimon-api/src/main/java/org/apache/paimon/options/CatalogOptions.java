@@ -18,6 +18,7 @@
 
 package org.apache.paimon.options;
 
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.table.CatalogTableType;
 
 import java.time.Duration;
@@ -128,6 +129,15 @@ public class CatalogOptions {
                     .memoryType()
                     .noDefaultValue()
                     .withDescription("Controls the maximum memory to cache manifest content.");
+
+    public static final ConfigOption<MemorySize> CACHE_MANIFEST_PAGE_SIZE =
+            key("cache.manifest.page-size")
+                    .memoryType()
+                    .defaultValue(CoreOptions.PAGE_SIZE.defaultValue())
+                    .withDescription(
+                            "Memory page size for the manifest cache. Smaller pages reduce per-entry "
+                                    + "tail-padding overhead and lower peak heap during cold-cache fill, "
+                                    + "at the cost of more MemorySegment objects per cached manifest.");
 
     public static final ConfigOption<Integer> CACHE_SNAPSHOT_MAX_NUM_PER_TABLE =
             key("cache.snapshot.max-num-per-table")

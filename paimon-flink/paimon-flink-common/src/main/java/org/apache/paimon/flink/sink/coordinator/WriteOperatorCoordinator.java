@@ -21,6 +21,7 @@ package org.apache.paimon.flink.sink.coordinator;
 import org.apache.paimon.flink.sink.TableWriteOperator;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.options.MemorySize;
+import org.apache.paimon.options.Options;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.utils.SegmentsCache;
 
@@ -36,6 +37,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ThreadPoolExecutor;
 
 import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_WRITER_COORDINATOR_CACHE_MEMORY;
+import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_WRITER_COORDINATOR_CACHE_PAGE_SIZE;
 import static org.apache.paimon.utils.ThreadPoolUtils.createCachedThreadPool;
 
 /**
@@ -56,9 +58,12 @@ public class WriteOperatorCoordinator implements OperatorCoordinator, Coordinati
     @Override
     public void start() throws Exception {
         executor = createCachedThreadPool(1, "WriteCoordinator");
-        MemorySize cacheMemory =
-                table.coreOptions().toConfiguration().get(SINK_WRITER_COORDINATOR_CACHE_MEMORY);
-        SegmentsCache<Path> manifestCache = SegmentsCache.create(cacheMemory, Long.MAX_VALUE);
+        Options tableOptions = table.coreOptions().toConfiguration();
+        MemorySize cacheMemory = tableOptions.get(SINK_WRITER_COORDINATOR_CACHE_MEMORY);
+        int cachePageSize =
+                (int) tableOptions.get(SINK_WRITER_COORDINATOR_CACHE_PAGE_SIZE).getBytes();
+        SegmentsCache<Path> manifestCache =
+                SegmentsCache.create(cachePageSize, cacheMemory, Long.MAX_VALUE);
         table.setManifestCache(manifestCache);
         coordinator = new TableWriteCoordinator(table);
     }
