@@ -66,6 +66,7 @@ import static java.util.Collections.singletonList;
 import static org.apache.paimon.data.BinaryString.fromString;
 import static org.apache.paimon.options.CatalogOptions.CACHE_EXPIRE_AFTER_ACCESS;
 import static org.apache.paimon.options.CatalogOptions.CACHE_MANIFEST_MAX_MEMORY;
+import static org.apache.paimon.options.CatalogOptions.CACHE_MANIFEST_PAGE_SIZE;
 import static org.apache.paimon.options.CatalogOptions.CACHE_MANIFEST_SMALL_FILE_MEMORY;
 import static org.apache.paimon.options.CatalogOptions.CACHE_MANIFEST_SMALL_FILE_THRESHOLD;
 import static org.apache.paimon.options.CatalogOptions.CACHE_PARTITION_MAX_NUM;
@@ -485,6 +486,8 @@ class CachingCatalogTest extends CatalogTestBase {
                 .isEqualTo(CACHE_MANIFEST_SMALL_FILE_MEMORY.defaultValue());
         assertThat(caching.manifestCache.maxElementSize())
                 .isEqualTo(CACHE_MANIFEST_SMALL_FILE_THRESHOLD.defaultValue().getBytes());
+        assertThat(caching.manifestCache.pageSize())
+                .isEqualTo((int) CACHE_MANIFEST_PAGE_SIZE.defaultValue().getBytes());
 
         options.set(CACHE_MANIFEST_SMALL_FILE_MEMORY, MemorySize.ofMebiBytes(100));
         options.set(CACHE_MANIFEST_SMALL_FILE_THRESHOLD, MemorySize.ofBytes(100));
@@ -496,5 +499,10 @@ class CachingCatalogTest extends CatalogTestBase {
         caching = (CachingCatalog) CachingCatalog.tryToCreate(catalog, options);
         assertThat(caching.manifestCache.maxMemorySize()).isEqualTo(MemorySize.ofMebiBytes(256));
         assertThat(caching.manifestCache.maxElementSize()).isEqualTo(Long.MAX_VALUE);
+
+        options.set(CACHE_MANIFEST_PAGE_SIZE, MemorySize.ofKibiBytes(2));
+        caching = (CachingCatalog) CachingCatalog.tryToCreate(catalog, options);
+        assertThat(caching.manifestCache.pageSize())
+                .isEqualTo((int) MemorySize.ofKibiBytes(2).getBytes());
     }
 }
