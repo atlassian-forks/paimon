@@ -112,7 +112,7 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
      * Default parallelism for the restore worker pool. Bumping this approximates packing more Flink
      * writer subtasks onto a single TM.
      */
-    private static final int NUM_RESTORE_THREADS = 1;
+    private static final int NUM_RESTORE_THREADS = 4;
 
     /** All tunables for one benchmark run. Defaults match the pre-spike-knobs version. */
     private static final class BenchParams {
@@ -134,13 +134,6 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
 
         int numWarmupIters = 1;
         int numMeasuredIters = 3;
-
-        /**
-         * Page size for the catalog manifest {@link SegmentsCache} (only meaningful when the
-         * catalog cache is enabled). {@code null} = leave the option unset and use {@link
-         * CatalogOptions#CACHE_MANIFEST_PAGE_SIZE}'s default.
-         */
-        MemorySize cachePageSize = null;
     }
 
     /**
@@ -213,34 +206,17 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
 
         OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
         Apple M4 Pro
-        segmentsCacheDisabled:                         Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
-        --------------------------------------------------------------------------------------------------------------
-        OPERATORTEST_segmentsCacheDisabled_restore        19269 / 19355              0.4        2408562.9       1.0X
+        segmentsCacheDisabled:                                                                               Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
+        --------------------------------------------------------------------------------------------------------------------------------------------------------------------
+        OPERATORTEST_segmentsCacheDisabled_restore                                                              20408 / 21196              0.4        2550975.9       1.0X
 
         Manifest cache footprint aggregate (segmentsCacheDisabled, 3 measured iters):
-          Disk          manifests=1,708,802 bytes (26 files), manifest-lists=25,842 bytes (20 files), index-manifests=0 bytes (0 files); total=1,734,644 bytes
+          Disk          manifests=1,709,535 bytes (26 files), manifest-lists=25,870 bytes (20 files), index-manifests=0 bytes (0 files); total=1,735,405 bytes
           SegmentsCache n/a (no manifest cache attached to table — cache disabled)
           Prefetch      n/a (prefetch disabled or prefetchedManifestEntriesCache empty for this table)
-          Heap          peak   avg=445,092,125 bytes, min=439,050,976, max=448,293,040 (avg 256.59x of disk, max 258.44x of disk)
-          Heap          steady avg=65,554,237 bytes, min=65,524,472, max=65,577,560
-          Heap          peak/steady avg=6.79x (max spike multiplier=6.84x)
-
-        Populated table has 8000 (partition, bucket) pairs across 2000 partitions (1 restore threads, 10x value cols, 64-char values, commit batch=10).
-
-        OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
-        Apple M4 Pro
-        segmentsCacheDisabled:                       Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
-        ------------------------------------------------------------------------------------------------------------
-        OPERATORTEST_segmentsCacheDisabled_restore      59920 / 60603              0.1        7489986.0       1.0X
-
-        Manifest cache footprint aggregate (segmentsCacheDisabled, 3 measured iters):
-          Disk          manifests=1,709,724 bytes (26 files), manifest-lists=25,890 bytes (20 files), index-manifests=0 bytes (0 files); total=1,735,614 bytes
-          SegmentsCache n/a (no manifest cache attached to table — cache disabled)
-          Prefetch      n/a (prefetch disabled or prefetchedManifestEntriesCache empty for this table)
-          Heap          peak   avg=329,326,496 bytes, min=284,876,480, max=417,174,520 (avg 189.75x of disk, max 240.36x of disk)
-          Heap          steady avg=65,010,000 bytes, min=64,998,176, max=65,018,552
-          Heap          peak/steady avg=5.07x (max spike multiplier=6.42x)
-
+          Heap          peak   avg=520,434,312 bytes, min=444,029,600, max=602,867,384 (avg 299.89x of disk, max 347.39x of disk)
+          Heap          steady avg=67,442,709 bytes, min=67,412,632, max=67,475,448
+          Heap          peak/steady avg=7.72x (max spike multiplier=8.93x)
          */
     }
 
@@ -254,60 +230,54 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         catalogOptions.set(CatalogOptions.CACHE_MANIFEST_MAX_MEMORY, MemorySize.ofMebiBytes(4096));
 
         BenchParams p = new BenchParams();
-        // Drive the page-size = 2 KB arm via the new CACHE_MANIFEST_PAGE_SIZE option (replaces the
-        // experimental hardcoded shim that previously lived in SegmentsCache.create). Setting it
-        // here exercises both the option plumbing in CachingCatalog and the heap-spike reduction
-        // documented in the inline comment block below.
-        p.cachePageSize = MemorySize.ofKibiBytes(2);
         innerTest("segmentsCacheEnabled", catalogOptions, tableOptions, p);
         /*
         Populated table has 8000 (partition, bucket) pairs across 2000 partitions (4 restore threads, 10x value cols, 64-char values, commit batch=10).
 
         OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
         Apple M4 Pro
-        segmentsCacheEnabled:                        Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
-        ------------------------------------------------------------------------------------------------------------
-        OPERATORTEST_segmentsCacheEnabled_restore          824 /  856              9.7         103014.9       1.0X
+        segmentsCacheEnabled:                                                                                Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
+        --------------------------------------------------------------------------------------------------------------------------------------------------------------------
+        OPERATORTEST_segmentsCacheEnabled_restore                                                                  866 /  881              9.2         108312.1       1.0X
 
         Manifest cache footprint aggregate (segmentsCacheEnabled, 3 measured iters):
-          Disk          manifests=1,784,522 bytes (26 files), manifest-lists=25,919 bytes (20 files), index-manifests=0 bytes (0 files); total=1,810,441 bytes
-          SegmentsCache bytes  avg=16,420,448, min=16,420,448, max=16,420,448 (avg 9.07x of disk)
-          Prefetch      n/a (prefetch disabled or prefetchedManifestEntriesCache empty for this table)
-          Heap          peak   avg=2,669,233,168 bytes, min=2,616,938,256, max=2,724,109,632 (avg 1474.36x of disk, max 1504.67x of disk)
-          Heap          steady avg=90,915,504 bytes, min=90,300,384, max=91,967,152
-          Heap          peak/steady avg=29.36x (max spike multiplier=29.62x)
-
-        Populated table has 8000 (partition, bucket) pairs across 2000 partitions (1 restore threads, 10x value cols, 64-char values, commit batch=10).
-
-        OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
-        Apple M4 Pro
-        segmentsCacheEnabled:                        Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
-        ------------------------------------------------------------------------------------------------------------
-        OPERATORTEST_segmentsCacheEnabled_restore         1379 / 1390              5.8         172318.8       1.0X
-
-        Manifest cache footprint aggregate (segmentsCacheEnabled, 3 measured iters):
-          Disk          manifests=1,783,248 bytes (26 files), manifest-lists=25,783 bytes (20 files), index-manifests=0 bytes (0 files); total=1,809,031 bytes
+          Disk          manifests=1,783,472 bytes (26 files), manifest-lists=25,882 bytes (20 files), index-manifests=0 bytes (0 files); total=1,809,354 bytes
           SegmentsCache bytes  avg=16,420,448, min=16,420,448, max=16,420,448 (avg 9.08x of disk)
           Prefetch      n/a (prefetch disabled or prefetchedManifestEntriesCache empty for this table)
-          Heap          peak   avg=993,320,496 bytes, min=893,018,888, max=1,086,595,392 (avg 549.09x of disk, max 600.65x of disk)
-          Heap          steady avg=95,949,181 bytes, min=92,931,904, max=99,424,496
-          Heap          peak/steady avg=10.35x (max spike multiplier=11.38x)
+          Heap          peak   avg=2,650,636,330 bytes, min=2,606,215,072, max=2,682,009,624 (avg 1464.96x of disk, max 1482.30x of disk)
+          Heap          steady avg=90,454,389 bytes, min=87,809,328, max=94,673,096
+          Heap          peak/steady avg=29.35x (max spike multiplier=30.54x)
+         */
+    }
 
-        Populated table has 8000 (partition, bucket) pairs across 2000 partitions (1 restore threads, 10x value cols, 64-char values, commit batch=10, page size=2kb).
+    @Test
+    public void testRestoreFiles_segmentsCacheEnabled_smallPage() throws Exception {
+        Options catalogOptions = new Options();
+        Options tableOptions = new Options();
+        tableOptions.set(CoreOptions.MANIFEST_PREFETCH_ENTRIES, false);
+        catalogOptions.set(
+                CatalogOptions.CACHE_MANIFEST_SMALL_FILE_MEMORY, MemorySize.ofMebiBytes(2048));
+        catalogOptions.set(CatalogOptions.CACHE_MANIFEST_MAX_MEMORY, MemorySize.ofMebiBytes(4096));
+        catalogOptions.set(CatalogOptions.CACHE_MANIFEST_PAGE_SIZE, MemorySize.ofKibiBytes(2));
+
+        BenchParams p = new BenchParams();
+        innerTest("segmentsCacheEnabled", catalogOptions, tableOptions, p);
+        /*
+        Populated table has 8000 (partition, bucket) pairs across 2000 partitions (4 restore threads, 10x value cols, 64-char values, commit batch=10).
 
         OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
         Apple M4 Pro
-        segmentsCacheEnabled:                        Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
-        ------------------------------------------------------------------------------------------------------------
-        OPERATORTEST_segmentsCacheEnabled_restore         1222 / 1239              6.5         152715.4       1.0X
+        segmentsCacheEnabled:                                                                                Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
+        --------------------------------------------------------------------------------------------------------------------------------------------------------------------
+        OPERATORTEST_segmentsCacheEnabled_restore                                                                  606 /  626             13.2          75712.2       1.0X
 
         Manifest cache footprint aggregate (segmentsCacheEnabled, 3 measured iters):
-          Disk          manifests=1,784,190 bytes (26 files), manifest-lists=25,905 bytes (20 files), index-manifests=0 bytes (0 files); total=1,810,095 bytes
-          SegmentsCache bytes  avg=16,420,448, min=16,420,448, max=16,420,448 (avg 9.07x of disk)
+          Disk          manifests=1,783,336 bytes (26 files), manifest-lists=25,853 bytes (20 files), index-manifests=0 bytes (0 files); total=1,809,189 bytes
+          SegmentsCache bytes  avg=16,420,448, min=16,420,448, max=16,420,448 (avg 9.08x of disk)
           Prefetch      n/a (prefetch disabled or prefetchedManifestEntriesCache empty for this table)
-          Heap          peak   avg=298,773,277 bytes, min=275,421,848, max=323,959,832 (avg 165.06x of disk, max 178.97x of disk)
-          Heap          steady avg=87,570,586 bytes, min=86,421,656, max=88,836,440
-          Heap          peak/steady avg=3.41x (max spike multiplier=3.70x)
+          Heap          peak   avg=418,961,637 bytes, min=409,442,928, max=427,189,712 (avg 231.57x of disk, max 236.12x of disk)
+          Heap          steady avg=87,728,946 bytes, min=86,784,744, max=88,987,888
+          Heap          peak/steady avg=4.78x (max spike multiplier=4.84x)
          */
     }
 
@@ -325,33 +295,17 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
 
         OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
         Apple M4 Pro
-        prefetchEnabled:                          Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
-        ---------------------------------------------------------------------------------------------------------
-        OPERATORTEST_prefetchEnabled_restore            981 / 1001              8.2         122571.8       1.0X
+        prefetchEnabled:                                                                                     Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
+        --------------------------------------------------------------------------------------------------------------------------------------------------------------------
+        OPERATORTEST_prefetchEnabled_restore                                                                       957 /  988              8.4         119568.5       1.0X
 
         Manifest cache footprint aggregate (prefetchEnabled, 3 measured iters):
-          Disk          manifests=1,708,208 bytes (26 files), manifest-lists=25,999 bytes (20 files), index-manifests=0 bytes (0 files); total=1,734,207 bytes
+          Disk          manifests=1,709,511 bytes (26 files), manifest-lists=25,858 bytes (20 files), index-manifests=0 bytes (0 files); total=1,735,369 bytes
           SegmentsCache n/a (no manifest cache attached to table — cache disabled)
-          Prefetch      bytes  avg=34,580,152, min=34,580,152, max=34,580,152 (entries=8000, avg 19.94x of disk)
-          Heap          peak   avg=287,973,176 bytes, min=258,901,208, max=309,943,696 (avg 166.05x of disk, max 178.72x of disk)
-          Heap          steady avg=86,211,877 bytes, min=82,621,592, max=88,016,792
-          Heap          peak/steady avg=3.35x (max spike multiplier=3.75x)
-
-        Populated table has 8000 (partition, bucket) pairs across 2000 partitions (1 restore threads, 10x value cols, 64-char values, commit batch=10).
-
-        OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
-        Apple M4 Pro
-        prefetchEnabled:                        Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
-        -------------------------------------------------------------------------------------------------------
-        OPERATORTEST_prefetchEnabled_restore         2474 / 2518              3.2         309311.1       1.0X
-
-        Manifest cache footprint aggregate (prefetchEnabled, 3 measured iters):
-          Disk          manifests=1,709,649 bytes (26 files), manifest-lists=25,895 bytes (20 files), index-manifests=0 bytes (0 files); total=1,735,544 bytes
-          SegmentsCache n/a (no manifest cache attached to table — cache disabled)
-          Prefetch      bytes  avg=34,565,832, min=34,565,832, max=34,565,832 (entries=8000, avg 19.92x of disk)
-          Heap          peak   avg=251,048,562 bytes, min=222,793,448, max=301,666,440 (avg 144.65x of disk, max 173.82x of disk)
-          Heap          steady avg=80,130,162 bytes, min=70,455,432, max=87,726,312
-          Heap          peak/steady avg=3.15x (max spike multiplier=3.67x)
+          Prefetch      bytes  avg=34,558,968, min=34,558,968, max=34,558,968 (entries=8000, avg 19.91x of disk)
+          Heap          peak   avg=258,442,642 bytes, min=255,884,704, max=261,055,608 (avg 148.93x of disk, max 150.43x of disk)
+          Heap          steady avg=86,215,066 bytes, min=82,585,232, max=88,112,544
+          Heap          peak/steady avg=3.00x (max spike multiplier=3.10x)
          */
     }
 
@@ -475,9 +429,6 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
             Options catalogOptions, Options tableOptions, String tableName, BenchParams p)
             throws Exception {
         catalogOptions.set(CatalogOptions.WAREHOUSE, tempFile.toUri().toString());
-        if (p.cachePageSize != null) {
-            catalogOptions.set(CatalogOptions.CACHE_MANIFEST_PAGE_SIZE, p.cachePageSize);
-        }
         Catalog catalog = CatalogFactory.createCatalog(CatalogContext.create(catalogOptions));
         String database = "default";
         catalog.createDatabase(database, true);
