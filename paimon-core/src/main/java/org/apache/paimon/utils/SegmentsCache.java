@@ -78,10 +78,7 @@ public class SegmentsCache<T> {
 
     @Nullable
     public static <T> SegmentsCache<T> create(MemorySize maxMemorySize, long maxElementSize) {
-        long pageSize = MemorySize.ofKibiBytes(2).getBytes();
-        long defaultPageSize = PAGE_SIZE.defaultValue().getBytes();
-        // return create((int) PAGE_SIZE.defaultValue().getBytes(), maxMemorySize, maxElementSize);
-        return create((int) pageSize, maxMemorySize, maxElementSize);
+        return create((int) PAGE_SIZE.defaultValue().getBytes(), maxMemorySize, maxElementSize);
     }
 
     @Nullable

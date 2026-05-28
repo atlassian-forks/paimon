@@ -134,6 +134,13 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
 
         int numWarmupIters = 1;
         int numMeasuredIters = 3;
+
+        /**
+         * Page size for the catalog manifest {@link SegmentsCache} (only meaningful when the
+         * catalog cache is enabled). {@code null} = leave the option unset and use {@link
+         * CatalogOptions#CACHE_MANIFEST_PAGE_SIZE}'s default.
+         */
+        MemorySize cachePageSize = null;
     }
 
     /**
@@ -247,6 +254,11 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         catalogOptions.set(CatalogOptions.CACHE_MANIFEST_MAX_MEMORY, MemorySize.ofMebiBytes(4096));
 
         BenchParams p = new BenchParams();
+        // Drive the page-size = 2 KB arm via the new CACHE_MANIFEST_PAGE_SIZE option (replaces the
+        // experimental hardcoded shim that previously lived in SegmentsCache.create). Setting it
+        // here exercises both the option plumbing in CachingCatalog and the heap-spike reduction
+        // documented in the inline comment block below.
+        p.cachePageSize = MemorySize.ofKibiBytes(2);
         innerTest("segmentsCacheEnabled", catalogOptions, tableOptions, p);
         /*
         Populated table has 8000 (partition, bucket) pairs across 2000 partitions (4 restore threads, 10x value cols, 64-char values, commit batch=10).
@@ -463,6 +475,9 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
             Options catalogOptions, Options tableOptions, String tableName, BenchParams p)
             throws Exception {
         catalogOptions.set(CatalogOptions.WAREHOUSE, tempFile.toUri().toString());
+        if (p.cachePageSize != null) {
+            catalogOptions.set(CatalogOptions.CACHE_MANIFEST_PAGE_SIZE, p.cachePageSize);
+        }
         Catalog catalog = CatalogFactory.createCatalog(CatalogContext.create(catalogOptions));
         String database = "default";
         catalog.createDatabase(database, true);
@@ -556,7 +571,10 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         SegmentsCache<Path> original = fst.getManifestCache();
         if (original != null) {
             fst.setManifestCache(
-                    SegmentsCache.create(original.maxMemorySize(), original.maxElementSize()));
+                    SegmentsCache.create(
+                            original.pageSize(),
+                            original.maxMemorySize(),
+                            original.maxElementSize()));
         }
         if (fst.coreOptions().prefetchManifestEntries()) {
             clearStaticPrefetchCache();
