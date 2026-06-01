@@ -525,7 +525,9 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
                     SegmentsCache.create(
                             original.pageSize(),
                             original.maxMemorySize(),
-                            original.maxElementSize()));
+                            original.maxElementSize(),
+                            original.ttl(),
+                            original.softValues()));
         }
         if (fst.coreOptions().prefetchManifestEntries()) {
             clearStaticPrefetchCache();

@@ -50,6 +50,7 @@ import static org.apache.paimon.options.CatalogOptions.CACHE_MANIFEST_MAX_MEMORY
 import static org.apache.paimon.options.CatalogOptions.CACHE_MANIFEST_PAGE_SIZE;
 import static org.apache.paimon.options.CatalogOptions.CACHE_MANIFEST_SMALL_FILE_MEMORY;
 import static org.apache.paimon.options.CatalogOptions.CACHE_MANIFEST_SMALL_FILE_THRESHOLD;
+import static org.apache.paimon.options.CatalogOptions.CACHE_MANIFEST_SOFT_VALUES;
 import static org.apache.paimon.options.CatalogOptions.CACHE_PARTITION_MAX_NUM;
 import static org.apache.paimon.options.CatalogOptions.CACHE_SNAPSHOT_MAX_NUM_PER_TABLE;
 import static org.apache.paimon.utils.Preconditions.checkNotNull;
@@ -96,9 +97,14 @@ public class CachingCatalog extends DelegateCatalog {
 
         this.snapshotMaxNumPerTable = options.get(CACHE_SNAPSHOT_MAX_NUM_PER_TABLE);
         int manifestCachePageSize = (int) options.get(CACHE_MANIFEST_PAGE_SIZE).getBytes();
+        boolean manifestCacheSoftValues = options.get(CACHE_MANIFEST_SOFT_VALUES);
         this.manifestCache =
                 SegmentsCache.create(
-                        manifestCachePageSize, manifestMaxMemory, manifestCacheThreshold);
+                        manifestCachePageSize,
+                        manifestMaxMemory,
+                        manifestCacheThreshold,
+                        expireAfterAccess,
+                        manifestCacheSoftValues);
 
         this.cachedPartitionMaxNum = options.get(CACHE_PARTITION_MAX_NUM);
         init(Ticker.systemTicker());
