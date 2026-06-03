@@ -98,12 +98,12 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       writer subtasks restoring concurrently.
  *   <li>Manifests are intentionally fragmented (small commit batches) and rows are widened (many
  *       columns × bigger values) to make per-manifest stats sizes realistic.
- *   <li>Per iteration we sample heap peak via {@link MemoryPoolMXBean#getPeakUsage()} and
- *       post-{@code System.gc()} steady-state via {@link
- *       java.lang.management.MemoryMXBean#getHeapMemoryUsage()}, and print the full {@code Manifest
- *       cache footprint} block — including {@code Peak/Steady} (the "spike multiplier") — at the
- *       end of each iteration. A one-line aggregate over the measured iterations is printed after
- *       the benchmark completes.
+ *   <li>Per iteration we sample heap usage before the restore task without forcing GC, heap peak
+ *       via {@link MemoryPoolMXBean#getPeakUsage()} after the restore task, and post-{@code
+ *       System.gc()} heap usage via {@link java.lang.management.MemoryMXBean#getHeapMemoryUsage()}.
+ *       The full {@code Manifest cache footprint} block — including {@code Peak/After-GC} (the
+ *       "spike multiplier") — is printed at the end of each iteration. A one-line aggregate over
+ *       the measured iterations is printed after the benchmark completes.
  * </ul>
  */
 public class WriteRestoreScanBenchmark extends TableBenchmark {
@@ -162,8 +162,9 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         /** {@code null} when prefetch is disabled or has no entry for this table. */
         final Integer prefetchEntries;
 
+        final long beforeHeap;
         final long peakHeap;
-        final long steadyHeap;
+        final long afterGcHeap;
 
         FootprintSample(
                 long manifestBytes,
@@ -175,8 +176,9 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
                 Long segmentsCacheBytes,
                 Long prefetchBytes,
                 Integer prefetchEntries,
+                long beforeHeap,
                 long peakHeap,
-                long steadyHeap) {
+                long afterGcHeap) {
             this.manifestBytes = manifestBytes;
             this.manifestCount = manifestCount;
             this.manifestListBytes = manifestListBytes;
@@ -187,8 +189,9 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
             this.segmentsCacheBytes = segmentsCacheBytes;
             this.prefetchBytes = prefetchBytes;
             this.prefetchEntries = prefetchEntries;
+            this.beforeHeap = beforeHeap;
             this.peakHeap = peakHeap;
-            this.steadyHeap = steadyHeap;
+            this.afterGcHeap = afterGcHeap;
         }
     }
 
@@ -208,15 +211,16 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         Apple M4 Pro
         segmentsCacheDisabled:                                                                               Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
         --------------------------------------------------------------------------------------------------------------------------------------------------------------------
-        OPERATORTEST_segmentsCacheDisabled_restore                                                              20408 / 21196              0.4        2550975.9       1.0X
+        OPERATORTEST_segmentsCacheDisabled_restore                                                              19506 / 19611              0.4        2438221.0       1.0X
 
         Manifest cache footprint aggregate (segmentsCacheDisabled, 3 measured iters):
-          Disk          manifests=1,709,535 bytes (26 files), manifest-lists=25,870 bytes (20 files), index-manifests=0 bytes (0 files); total=1,735,405 bytes
+          Disk          manifests=1,708,256 bytes (26 files), manifest-lists=25,876 bytes (20 files), index-manifests=0 bytes (0 files); total=1,734,132 bytes
           SegmentsCache n/a (no manifest cache attached to table — cache disabled)
           Prefetch      n/a (prefetch disabled or prefetchedManifestEntriesCache empty for this table)
-          Heap          peak   avg=520,434,312 bytes, min=444,029,600, max=602,867,384 (avg 299.89x of disk, max 347.39x of disk)
-          Heap          steady avg=67,442,709 bytes, min=67,412,632, max=67,475,448
-          Heap          peak/steady avg=7.72x (max spike multiplier=8.93x)
+          Heap          before  avg=28,931,224 bytes, min=28,920,536, max=28,952,456 (avg 16.68x of disk)
+          Heap          peak   avg=446,707,858 bytes, min=398,869,184, max=539,281,592 (avg 257.60x of disk, max 310.98x of disk)
+          Heap          after-gc avg=28,940,693 bytes, min=28,920,536, max=28,953,672 (avg 16.69x of disk)
+          Heap          peak/after-gc avg=15.43x (max spike multiplier=18.63x)
          */
     }
 
@@ -238,15 +242,16 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         Apple M4 Pro
         segmentsCacheEnabled:                                                                                Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
         --------------------------------------------------------------------------------------------------------------------------------------------------------------------
-        OPERATORTEST_segmentsCacheEnabled_restore                                                                  866 /  881              9.2         108312.1       1.0X
+        OPERATORTEST_segmentsCacheEnabled_restore                                                                  810 /  846              9.9         101285.7       1.0X
 
         Manifest cache footprint aggregate (segmentsCacheEnabled, 3 measured iters):
-          Disk          manifests=1,783,472 bytes (26 files), manifest-lists=25,882 bytes (20 files), index-manifests=0 bytes (0 files); total=1,809,354 bytes
-          SegmentsCache bytes  avg=16,420,448, min=16,420,448, max=16,420,448 (avg 9.08x of disk)
+          Disk          manifests=1,782,515 bytes (26 files), manifest-lists=25,866 bytes (20 files), index-manifests=0 bytes (0 files); total=1,808,381 bytes
+          SegmentsCache bytes  avg=16,422,240, min=16,422,240, max=16,422,240 (avg 9.08x of disk)
           Prefetch      n/a (prefetch disabled or prefetchedManifestEntriesCache empty for this table)
-          Heap          peak   avg=2,650,636,330 bytes, min=2,606,215,072, max=2,682,009,624 (avg 1464.96x of disk, max 1482.30x of disk)
-          Heap          steady avg=90,454,389 bytes, min=87,809,328, max=94,673,096
-          Heap          peak/steady avg=29.35x (max spike multiplier=30.54x)
+          Heap          before  avg=51,178,080 bytes, min=46,721,584, max=56,006,200 (avg 28.30x of disk)
+          Heap          peak   avg=2,485,914,752 bytes, min=2,415,236,776, max=2,535,920,032 (avg 1374.66x of disk, max 1402.32x of disk)
+          Heap          after-gc avg=52,166,234 bytes, min=49,689,296, max=56,004,600 (avg 28.85x of disk)
+          Heap          peak/after-gc avg=47.74x (max spike multiplier=49.34x)
          */
     }
 
@@ -261,23 +266,24 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         catalogOptions.set(CatalogOptions.CACHE_MANIFEST_PAGE_SIZE, MemorySize.ofKibiBytes(2));
 
         BenchParams p = new BenchParams();
-        innerTest("segmentsCacheEnabled", catalogOptions, tableOptions, p);
+        innerTest("segmentsCacheEnabled_smallPage", catalogOptions, tableOptions, p);
         /*
         Populated table has 8000 (partition, bucket) pairs across 2000 partitions (4 restore threads, 10x value cols, 64-char values, commit batch=10).
 
         OpenJDK 64-Bit Server VM 11.0.28+0 on Mac OS X 26.5
         Apple M4 Pro
-        segmentsCacheEnabled:                                                                                Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
+        segmentsCacheEnabled_smallPage:                                                                      Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
         --------------------------------------------------------------------------------------------------------------------------------------------------------------------
-        OPERATORTEST_segmentsCacheEnabled_restore                                                                  606 /  626             13.2          75712.2       1.0X
+        OPERATORTEST_segmentsCacheEnabled_smallPage_restore                                                        619 /  625             12.9          77417.1       1.0X
 
-        Manifest cache footprint aggregate (segmentsCacheEnabled, 3 measured iters):
-          Disk          manifests=1,783,336 bytes (26 files), manifest-lists=25,853 bytes (20 files), index-manifests=0 bytes (0 files); total=1,809,189 bytes
-          SegmentsCache bytes  avg=16,420,448, min=16,420,448, max=16,420,448 (avg 9.08x of disk)
+        Manifest cache footprint aggregate (segmentsCacheEnabled_smallPage, 3 measured iters):
+          Disk          manifests=1,783,244 bytes (26 files), manifest-lists=25,922 bytes (20 files), index-manifests=0 bytes (0 files); total=1,809,166 bytes
+          SegmentsCache bytes  avg=16,422,432, min=16,422,432, max=16,422,432 (avg 9.08x of disk)
           Prefetch      n/a (prefetch disabled or prefetchedManifestEntriesCache empty for this table)
-          Heap          peak   avg=418,961,637 bytes, min=409,442,928, max=427,189,712 (avg 231.57x of disk, max 236.12x of disk)
-          Heap          steady avg=87,728,946 bytes, min=86,784,744, max=88,987,888
-          Heap          peak/steady avg=4.78x (max spike multiplier=4.84x)
+          Heap          before  avg=51,098,506 bytes, min=50,472,840, max=51,792,392 (avg 28.24x of disk)
+          Heap          peak   avg=305,524,074 bytes, min=286,249,576, max=319,771,600 (avg 168.88x of disk, max 176.75x of disk)
+          Heap          after-gc avg=50,750,858 bytes, min=49,433,144, max=51,790,792 (avg 28.05x of disk)
+          Heap          peak/after-gc avg=6.02x (max spike multiplier=6.28x)
          */
     }
 
@@ -297,15 +303,16 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         Apple M4 Pro
         prefetchEnabled:                                                                                     Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
         --------------------------------------------------------------------------------------------------------------------------------------------------------------------
-        OPERATORTEST_prefetchEnabled_restore                                                                       957 /  988              8.4         119568.5       1.0X
+        OPERATORTEST_prefetchEnabled_restore                                                                      1039 / 1126              7.7         129854.2       1.0X
 
         Manifest cache footprint aggregate (prefetchEnabled, 3 measured iters):
-          Disk          manifests=1,709,511 bytes (26 files), manifest-lists=25,858 bytes (20 files), index-manifests=0 bytes (0 files); total=1,735,369 bytes
+          Disk          manifests=1,708,053 bytes (26 files), manifest-lists=25,859 bytes (20 files), index-manifests=0 bytes (0 files); total=1,733,912 bytes
           SegmentsCache n/a (no manifest cache attached to table — cache disabled)
-          Prefetch      bytes  avg=34,558,968, min=34,558,968, max=34,558,968 (entries=8000, avg 19.91x of disk)
-          Heap          peak   avg=258,442,642 bytes, min=255,884,704, max=261,055,608 (avg 148.93x of disk, max 150.43x of disk)
-          Heap          steady avg=86,215,066 bytes, min=82,585,232, max=88,112,544
-          Heap          peak/steady avg=3.00x (max spike multiplier=3.10x)
+          Prefetch      bytes  avg=31,294,528, min=31,294,528, max=31,294,528 (entries=8000, avg 18.05x of disk)
+          Heap          before  avg=26,290,925 bytes, min=26,175,408, max=26,365,480 (avg 15.16x of disk)
+          Heap          peak   avg=214,257,226 bytes, min=199,295,712, max=225,221,552 (avg 123.57x of disk, max 129.89x of disk)
+          Heap          after-gc avg=46,711,752 bytes, min=43,011,408, max=48,578,824 (avg 26.94x of disk)
+          Heap          peak/after-gc avg=4.61x (max spike multiplier=5.07x)
          */
     }
 
@@ -354,6 +361,10 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
 
                         try {
                             resetCachesForIteration(fst);
+                            // also fully run gc before starting iterations
+                            System.gc();
+                            System.runFinalization();
+                            System.gc();
                         } catch (Exception e) {
                             throw new RuntimeException(e);
                         }
@@ -375,6 +386,7 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
                                 pool.resetPeakUsage();
                             }
                         }
+                        long before = currentHeapUsage();
 
                         List<Future<?>> futures = new ArrayList<>(bucketEntries.size());
                         for (BucketEntry entry : bucketEntries) {
@@ -406,12 +418,12 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
                         System.gc();
                         System.runFinalization();
                         System.gc();
-                        long steady =
-                                ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getUsed();
+                        long afterGc = currentHeapUsage();
 
                         try {
                             FootprintSample sample =
-                                    printCacheFootprint(name + " " + iterLabel, fst, peak, steady);
+                                    printCacheFootprint(
+                                            name + " " + iterLabel, fst, before, peak, afterGc);
                             perIterSamples.add(sample);
                         } catch (Exception e) {
                             throw new RuntimeException(e);
@@ -529,16 +541,14 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
                             original.ttl(),
                             original.softValues()));
         }
-        if (fst.coreOptions().prefetchManifestEntries()) {
-            clearStaticPrefetchCache();
-        }
+        clearStaticPrefetchCache();
     }
 
     /**
      * Print a per-iteration footprint summary: total manifest directory bytes on disk (split by
      * file-name prefix), the table's {@link SegmentsCache} accounting bytes, the JOL deep retained
-     * size of the prefetched manifest entries for this table, the just-sampled heap peak and
-     * post-GC steady-state, and memory-to-disk plus {@code Peak/Steady} (spike multiplier) ratios.
+     * size of the prefetched manifest entries for this table, the just-sampled heap before/peak and
+     * post-GC usage, and memory-to-disk plus {@code Peak/After-GC} (spike multiplier) ratios.
      *
      * <p>Caveats:
      *
@@ -559,7 +569,8 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
      * </ul>
      */
     private FootprintSample printCacheFootprint(
-            String label, FileStoreTable fst, long peak, long steady) throws Exception {
+            String label, FileStoreTable fst, long before, long peak, long afterGc)
+            throws Exception {
         Path manifestDir = new Path(fst.snapshotManager().tablePath(), "manifest");
         FileStatus[] statuses = fst.snapshotManager().fileIO().listStatus(manifestDir);
         long manifestBytes = 0;
@@ -632,15 +643,18 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
                 diskTotal);
         System.out.println("  " + segmentsCacheLine);
         System.out.println("  " + prefetchLine);
-        System.out.printf("  Heap          peak=%,d bytes, steady=%,d bytes%n", peak, steady);
+        System.out.printf(
+                "  Heap          before=%,d bytes, peak=%,d bytes, after-gc=%,d bytes%n",
+                before, peak, afterGc);
         if (diskTotal > 0) {
             System.out.printf(
-                    "  Ratios        SegmentsCache/disk=%s, Prefetch/disk=%s, Peak/disk=%s, Steady/disk=%s, Peak/Steady=%s%n",
+                    "  Ratios        SegmentsCache/disk=%s, Prefetch/disk=%s, Before/disk=%s, Peak/disk=%s, After-GC/disk=%s, Peak/After-GC=%s%n",
                     ratio(segmentsCacheBytes, diskTotal),
                     ratio(prefetchBytes, diskTotal),
+                    ratio(before, diskTotal),
                     ratio(peak, diskTotal),
-                    ratio(steady, diskTotal),
-                    ratio(peak, steady));
+                    ratio(afterGc, diskTotal),
+                    ratio(peak, afterGc));
         }
         System.out.println();
 
@@ -654,15 +668,16 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
                 segmentsCacheBytes,
                 prefetchBytes,
                 prefetchEntries,
+                before,
                 peak,
-                steady);
+                afterGc);
     }
 
     /**
      * Print one-block aggregate over the <b>measured</b> iterations (warmup iterations skipped).
      * Reports Disk (constant — printed once), {@link SegmentsCache} bytes (avg/min/max + avg ratio
-     * to disk), Prefetch bytes (avg/min/max + entries + avg ratio to disk), and Heap peak/steady
-     * (avg/min/max + Peak/Steady spike multiplier + peak/disk and steady/disk ratios).
+     * to disk), Prefetch bytes (avg/min/max + entries + avg ratio to disk), and Heap
+     * before/peak/after-GC (avg/min/max + Peak/After-GC spike multiplier + heap/disk ratios).
      */
     private void printAggregateFootprint(
             String name, BenchParams p, List<FootprintSample> samples) {
@@ -688,12 +703,15 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         int pfEntries = -1;
         int pfN = 0;
 
+        long beforeSum = 0;
+        long beforeMin = Long.MAX_VALUE;
+        long beforeMax = Long.MIN_VALUE;
         long peakSum = 0;
         long peakMin = Long.MAX_VALUE;
         long peakMax = Long.MIN_VALUE;
-        long steadySum = 0;
-        long steadyMin = Long.MAX_VALUE;
-        long steadyMax = Long.MIN_VALUE;
+        long afterGcSum = 0;
+        long afterGcMin = Long.MAX_VALUE;
+        long afterGcMax = Long.MIN_VALUE;
         double psRatioSum = 0;
         double psRatioMax = 0;
 
@@ -714,13 +732,16 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
                 pfEntries = s.prefetchEntries == null ? pfEntries : s.prefetchEntries;
                 pfN++;
             }
+            beforeSum += s.beforeHeap;
+            beforeMin = Math.min(beforeMin, s.beforeHeap);
+            beforeMax = Math.max(beforeMax, s.beforeHeap);
             peakSum += s.peakHeap;
             peakMin = Math.min(peakMin, s.peakHeap);
             peakMax = Math.max(peakMax, s.peakHeap);
-            steadySum += s.steadyHeap;
-            steadyMin = Math.min(steadyMin, s.steadyHeap);
-            steadyMax = Math.max(steadyMax, s.steadyHeap);
-            double psRatio = s.steadyHeap == 0 ? 0 : (double) s.peakHeap / s.steadyHeap;
+            afterGcSum += s.afterGcHeap;
+            afterGcMin = Math.min(afterGcMin, s.afterGcHeap);
+            afterGcMax = Math.max(afterGcMax, s.afterGcHeap);
+            double psRatio = s.afterGcHeap == 0 ? 0 : (double) s.peakHeap / s.afterGcHeap;
             psRatioSum += psRatio;
             psRatioMax = Math.max(psRatioMax, psRatio);
         }
@@ -756,6 +777,9 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
                     "  Prefetch      n/a (prefetch disabled or prefetchedManifestEntriesCache empty for this table)");
         }
         System.out.printf(
+                "  Heap          before  avg=%,d bytes, min=%,d, max=%,d (avg %s of disk)%n",
+                beforeSum / n, beforeMin, beforeMax, ratio(beforeSum / n, first.diskTotal));
+        System.out.printf(
                 "  Heap          peak   avg=%,d bytes, min=%,d, max=%,d (avg %s of disk, max %s of disk)%n",
                 peakSum / n,
                 peakMin,
@@ -763,12 +787,16 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
                 ratio(peakSum / n, first.diskTotal),
                 ratio(peakMax, first.diskTotal));
         System.out.printf(
-                "  Heap          steady avg=%,d bytes, min=%,d, max=%,d%n",
-                steadySum / n, steadyMin, steadyMax);
+                "  Heap          after-gc avg=%,d bytes, min=%,d, max=%,d (avg %s of disk)%n",
+                afterGcSum / n, afterGcMin, afterGcMax, ratio(afterGcSum / n, first.diskTotal));
         System.out.printf(
-                "  Heap          peak/steady avg=%.2fx (max spike multiplier=%.2fx)%n",
+                "  Heap          peak/after-gc avg=%.2fx (max spike multiplier=%.2fx)%n",
                 psRatioSum / n, psRatioMax);
         System.out.println();
+    }
+
+    private static long currentHeapUsage() {
+        return ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getUsed();
     }
 
     /**
