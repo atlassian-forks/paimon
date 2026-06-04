@@ -563,6 +563,18 @@ public class FlinkConnectorOptions {
                                     + "Distinct from 'sink.writer-coordinator.cache-page-size', which "
                                     + "controls the manifest cache memory layout, not RPC chunking.");
 
+    public static final ConfigOption<Boolean> SINK_WRITER_COORDINATOR_PREFETCH_MANIFESTS =
+            key("sink.writer-coordinator.prefetch-manifests")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "If true, the writer coordinator eagerly reads all data manifests of the "
+                                    + "latest snapshot during refresh to warm the in-JobManager manifest "
+                                    + "cache (SegmentsCache). This avoids many concurrent cold manifest "
+                                    + "reads when high-parallelism writers restore at the same time, "
+                                    + "reducing Job Manager heap pressure at the cost of one full manifest "
+                                    + "read per refresh.");
+
     public static final ConfigOption<Boolean> FILESYSTEM_JOB_LEVEL_SETTINGS_ENABLED =
             key("filesystem.job-level-settings.enabled")
                     .booleanType()

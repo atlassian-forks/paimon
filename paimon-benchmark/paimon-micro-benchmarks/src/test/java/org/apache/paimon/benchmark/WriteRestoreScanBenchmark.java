@@ -232,6 +232,7 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         catalogOptions.set(
                 CatalogOptions.CACHE_MANIFEST_SMALL_FILE_MEMORY, MemorySize.ofMebiBytes(2048));
         catalogOptions.set(CatalogOptions.CACHE_MANIFEST_MAX_MEMORY, MemorySize.ofMebiBytes(4096));
+        catalogOptions.set(CatalogOptions.CACHE_MANIFEST_SOFT_VALUES, false);
 
         BenchParams p = new BenchParams();
         innerTest("segmentsCacheEnabled", catalogOptions, tableOptions, p);
@@ -264,6 +265,7 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
                 CatalogOptions.CACHE_MANIFEST_SMALL_FILE_MEMORY, MemorySize.ofMebiBytes(2048));
         catalogOptions.set(CatalogOptions.CACHE_MANIFEST_MAX_MEMORY, MemorySize.ofMebiBytes(4096));
         catalogOptions.set(CatalogOptions.CACHE_MANIFEST_PAGE_SIZE, MemorySize.ofKibiBytes(2));
+        catalogOptions.set(CatalogOptions.CACHE_MANIFEST_SOFT_VALUES, false);
 
         BenchParams p = new BenchParams();
         innerTest("segmentsCacheEnabled_smallPage", catalogOptions, tableOptions, p);
