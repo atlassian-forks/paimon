@@ -71,6 +71,51 @@ class WriteOperatorCoordinatorTest extends TableTestBase {
         }
     }
 
+    @Test
+    public void testManifestCacheSoftValuesAndTtlDefault() throws Exception {
+        FileStoreTable table = createTableForCoordinator(null);
+
+        WriteOperatorCoordinator coordinator = new WriteOperatorCoordinator(table);
+        try {
+            coordinator.start();
+            SegmentsCache<Path> manifestCache = table.getManifestCache();
+            assertThat(manifestCache).isNotNull();
+            assertThat(manifestCache.softValues()).isTrue();
+            assertThat(manifestCache.ttl())
+                    .isEqualTo(
+                            FlinkConnectorOptions.SINK_WRITER_COORDINATOR_CACHE_EXPIRE_AFTER_ACCESS
+                                    .defaultValue());
+        } finally {
+            coordinator.close();
+        }
+    }
+
+    @Test
+    public void testManifestCacheSoftValuesOverride() throws Exception {
+        Identifier identifier = new Identifier(database, "wocoord_soft_values");
+        catalog.createTable(
+                identifier,
+                Schema.newBuilder()
+                        .column("f0", DataTypes.INT())
+                        .option(
+                                FlinkConnectorOptions.SINK_WRITER_COORDINATOR_CACHE_SOFT_VALUES
+                                        .key(),
+                                "false")
+                        .build(),
+                false);
+        FileStoreTable table = getTable(identifier);
+
+        WriteOperatorCoordinator coordinator = new WriteOperatorCoordinator(table);
+        try {
+            coordinator.start();
+            SegmentsCache<Path> manifestCache = table.getManifestCache();
+            assertThat(manifestCache).isNotNull();
+            assertThat(manifestCache.softValues()).isFalse();
+        } finally {
+            coordinator.close();
+        }
+    }
+
     private FileStoreTable createTableForCoordinator(MemorySize pageSizeOverride) throws Exception {
         Identifier identifier = new Identifier(database, "wocoord_t");
         Schema.Builder schemaBuilder = Schema.newBuilder().column("f0", DataTypes.INT());

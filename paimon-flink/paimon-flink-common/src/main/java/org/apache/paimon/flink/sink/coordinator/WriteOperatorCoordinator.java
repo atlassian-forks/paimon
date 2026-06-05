@@ -32,12 +32,15 @@ import org.apache.flink.runtime.operators.coordination.CoordinationResponse;
 import org.apache.flink.runtime.operators.coordination.OperatorCoordinator;
 import org.apache.flink.runtime.operators.coordination.OperatorEvent;
 
+import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ThreadPoolExecutor;
 
+import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_WRITER_COORDINATOR_CACHE_EXPIRE_AFTER_ACCESS;
 import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_WRITER_COORDINATOR_CACHE_MEMORY;
 import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_WRITER_COORDINATOR_CACHE_PAGE_SIZE;
+import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_WRITER_COORDINATOR_CACHE_SOFT_VALUES;
 import static org.apache.paimon.utils.ThreadPoolUtils.createCachedThreadPool;
 
 /**
@@ -62,8 +65,16 @@ public class WriteOperatorCoordinator implements OperatorCoordinator, Coordinati
         MemorySize cacheMemory = tableOptions.get(SINK_WRITER_COORDINATOR_CACHE_MEMORY);
         int cachePageSize =
                 (int) tableOptions.get(SINK_WRITER_COORDINATOR_CACHE_PAGE_SIZE).getBytes();
+        Duration cacheExpireAfterAccess =
+                tableOptions.get(SINK_WRITER_COORDINATOR_CACHE_EXPIRE_AFTER_ACCESS);
+        boolean cacheSoftValues = tableOptions.get(SINK_WRITER_COORDINATOR_CACHE_SOFT_VALUES);
         SegmentsCache<Path> manifestCache =
-                SegmentsCache.create(cachePageSize, cacheMemory, Long.MAX_VALUE);
+                SegmentsCache.create(
+                        cachePageSize,
+                        cacheMemory,
+                        Long.MAX_VALUE,
+                        cacheExpireAfterAccess,
+                        cacheSoftValues);
         table.setManifestCache(manifestCache);
         coordinator = new TableWriteCoordinator(table);
     }

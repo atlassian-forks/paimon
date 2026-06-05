@@ -139,6 +139,19 @@ public class CatalogOptions {
                                     + "tail-padding overhead and lower peak heap during cold-cache fill, "
                                     + "at the cost of more MemorySegment objects per cached manifest.");
 
+    public static final ConfigOption<Boolean> CACHE_MANIFEST_SOFT_VALUES =
+            key("cache.manifest.soft-values")
+                    .booleanType()
+                    .defaultValue(true)
+                    .withDescription(
+                            "If true (default), manifest cache entries are held with soft references "
+                                    + "and may be reclaimed by the GC under memory pressure. This can "
+                                    + "trigger a cache-thrash spiral where reclaimed entries are "
+                                    + "refetched, spiking heap and forcing further reclamation. Set to "
+                                    + "false to hold entries with strong references, breaking the spiral "
+                                    + "at the cost of deterministic heap occupancy (size '-Xmx' to at "
+                                    + "least roughly twice 'cache.manifest.max-memory').");
+
     public static final ConfigOption<Integer> CACHE_SNAPSHOT_MAX_NUM_PER_TABLE =
             key("cache.snapshot.max-num-per-table")
                     .intType()
