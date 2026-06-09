@@ -211,16 +211,16 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         Apple M4 Pro
         segmentsCacheDisabled:                                                                               Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
         --------------------------------------------------------------------------------------------------------------------------------------------------------------------
-        OPERATORTEST_segmentsCacheDisabled_restore                                                              19506 / 19611              0.4        2438221.0       1.0X
+        OPERATORTEST_segmentsCacheDisabled_restore                                                              18915 / 19044              0.4        2364354.1       1.0X
 
         Manifest cache footprint aggregate (segmentsCacheDisabled, 3 measured iters):
-          Disk          manifests=1,708,256 bytes (26 files), manifest-lists=25,876 bytes (20 files), index-manifests=0 bytes (0 files); total=1,734,132 bytes
+          Disk          manifests=1,707,536 bytes (26 files), manifest-lists=25,915 bytes (20 files), index-manifests=0 bytes (0 files); total=1,733,451 bytes
           SegmentsCache n/a (no manifest cache attached to table — cache disabled)
           Prefetch      n/a (prefetch disabled or prefetchedManifestEntriesCache empty for this table)
-          Heap          before  avg=28,931,224 bytes, min=28,920,536, max=28,952,456 (avg 16.68x of disk)
-          Heap          peak   avg=446,707,858 bytes, min=398,869,184, max=539,281,592 (avg 257.60x of disk, max 310.98x of disk)
-          Heap          after-gc avg=28,940,693 bytes, min=28,920,536, max=28,953,672 (avg 16.69x of disk)
-          Heap          peak/after-gc avg=15.43x (max spike multiplier=18.63x)
+          Heap          before  avg=30,596,917 bytes, min=30,584,480, max=30,621,648 (avg 17.65x of disk)
+          Heap          peak   avg=384,227,248 bytes, min=380,394,312, max=389,768,056 (avg 221.65x of disk, max 224.85x of disk)
+          Heap          after-gc avg=30,605,949 bytes, min=30,584,480, max=30,621,552 (avg 17.66x of disk)
+          Heap          peak/after-gc avg=12.55x (max spike multiplier=12.73x)
          */
     }
 
@@ -243,16 +243,16 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         Apple M4 Pro
         segmentsCacheEnabled:                                                                                Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
         --------------------------------------------------------------------------------------------------------------------------------------------------------------------
-        OPERATORTEST_segmentsCacheEnabled_restore                                                                  810 /  846              9.9         101285.7       1.0X
+        OPERATORTEST_segmentsCacheEnabled_restore                                                                  613 /  622             13.1          76585.7       1.0X
 
         Manifest cache footprint aggregate (segmentsCacheEnabled, 3 measured iters):
-          Disk          manifests=1,782,515 bytes (26 files), manifest-lists=25,866 bytes (20 files), index-manifests=0 bytes (0 files); total=1,808,381 bytes
-          SegmentsCache bytes  avg=16,422,240, min=16,422,240, max=16,422,240 (avg 9.08x of disk)
+          Disk          manifests=1,785,338 bytes (26 files), manifest-lists=25,910 bytes (20 files), index-manifests=0 bytes (0 files); total=1,811,248 bytes
+          SegmentsCache bytes  avg=16,422,240, min=16,422,240, max=16,422,240 (avg 9.07x of disk)
           Prefetch      n/a (prefetch disabled or prefetchedManifestEntriesCache empty for this table)
-          Heap          before  avg=51,178,080 bytes, min=46,721,584, max=56,006,200 (avg 28.30x of disk)
-          Heap          peak   avg=2,485,914,752 bytes, min=2,415,236,776, max=2,535,920,032 (avg 1374.66x of disk, max 1402.32x of disk)
-          Heap          after-gc avg=52,166,234 bytes, min=49,689,296, max=56,004,600 (avg 28.85x of disk)
-          Heap          peak/after-gc avg=47.74x (max spike multiplier=49.34x)
+          Heap          before  avg=49,020,690 bytes, min=47,396,328, max=52,228,256 (avg 27.06x of disk)
+          Heap          peak   avg=400,259,984 bytes, min=376,393,272, max=426,200,520 (avg 220.99x of disk, max 235.31x of disk)
+          Heap          after-gc avg=50,887,970 bytes, min=47,394,736, max=53,042,464 (avg 28.10x of disk)
+          Heap          peak/after-gc avg=7.88x (max spike multiplier=8.40x)
          */
     }
 
@@ -276,16 +276,16 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         Apple M4 Pro
         segmentsCacheEnabled_smallPage:                                                                      Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
         --------------------------------------------------------------------------------------------------------------------------------------------------------------------
-        OPERATORTEST_segmentsCacheEnabled_smallPage_restore                                                        619 /  625             12.9          77417.1       1.0X
+        OPERATORTEST_segmentsCacheEnabled_smallPage_restore                                                        605 /  617             13.2          75663.6       1.0X
 
         Manifest cache footprint aggregate (segmentsCacheEnabled_smallPage, 3 measured iters):
-          Disk          manifests=1,783,244 bytes (26 files), manifest-lists=25,922 bytes (20 files), index-manifests=0 bytes (0 files); total=1,809,166 bytes
+          Disk          manifests=1,783,321 bytes (26 files), manifest-lists=25,925 bytes (20 files), index-manifests=0 bytes (0 files); total=1,809,246 bytes
           SegmentsCache bytes  avg=16,422,432, min=16,422,432, max=16,422,432 (avg 9.08x of disk)
           Prefetch      n/a (prefetch disabled or prefetchedManifestEntriesCache empty for this table)
-          Heap          before  avg=51,098,506 bytes, min=50,472,840, max=51,792,392 (avg 28.24x of disk)
-          Heap          peak   avg=305,524,074 bytes, min=286,249,576, max=319,771,600 (avg 168.88x of disk, max 176.75x of disk)
-          Heap          after-gc avg=50,750,858 bytes, min=49,433,144, max=51,790,792 (avg 28.05x of disk)
-          Heap          peak/after-gc avg=6.02x (max spike multiplier=6.28x)
+          Heap          before  avg=47,634,520 bytes, min=46,992,936, max=48,558,552 (avg 26.33x of disk)
+          Heap          peak   avg=397,549,856 bytes, min=372,505,400, max=432,364,032 (avg 219.73x of disk, max 238.97x of disk)
+          Heap          after-gc avg=48,709,448 bytes, min=46,991,392, max=51,786,472 (avg 26.92x of disk)
+          Heap          peak/after-gc avg=8.19x (max spike multiplier=9.20x)
          */
     }
 
@@ -305,16 +305,16 @@ public class WriteRestoreScanBenchmark extends TableBenchmark {
         Apple M4 Pro
         prefetchEnabled:                                                                                     Best/Avg Time(ms)    Row Rate(K/s)      Per Row(ns)   Relative
         --------------------------------------------------------------------------------------------------------------------------------------------------------------------
-        OPERATORTEST_prefetchEnabled_restore                                                                      1039 / 1126              7.7         129854.2       1.0X
+        OPERATORTEST_prefetchEnabled_restore                                                                      1001 / 1024              8.0         125069.8       1.0X
 
         Manifest cache footprint aggregate (prefetchEnabled, 3 measured iters):
-          Disk          manifests=1,708,053 bytes (26 files), manifest-lists=25,859 bytes (20 files), index-manifests=0 bytes (0 files); total=1,733,912 bytes
+          Disk          manifests=1,708,606 bytes (26 files), manifest-lists=25,872 bytes (20 files), index-manifests=0 bytes (0 files); total=1,734,478 bytes
           SegmentsCache n/a (no manifest cache attached to table — cache disabled)
-          Prefetch      bytes  avg=31,294,528, min=31,294,528, max=31,294,528 (entries=8000, avg 18.05x of disk)
-          Heap          before  avg=26,290,925 bytes, min=26,175,408, max=26,365,480 (avg 15.16x of disk)
-          Heap          peak   avg=214,257,226 bytes, min=199,295,712, max=225,221,552 (avg 123.57x of disk, max 129.89x of disk)
-          Heap          after-gc avg=46,711,752 bytes, min=43,011,408, max=48,578,824 (avg 26.94x of disk)
-          Heap          peak/after-gc avg=4.61x (max spike multiplier=5.07x)
+          Prefetch      bytes  avg=31,363,282, min=31,327,744, max=31,434,360 (entries=8000, avg 18.08x of disk)
+          Heap          before  avg=26,287,618 bytes, min=26,138,816, max=26,378,816 (avg 15.16x of disk)
+          Heap          peak   avg=210,689,234 bytes, min=193,303,240, max=224,128,704 (avg 121.47x of disk, max 129.22x of disk)
+          Heap          after-gc avg=46,754,616 bytes, min=43,163,384, max=48,592,160 (avg 26.96x of disk)
+          Heap          peak/after-gc avg=4.52x (max spike multiplier=4.97x)
          */
     }
 
