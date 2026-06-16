@@ -31,7 +31,7 @@ under the License.
     <artifactId>paimon-parent</artifactId>
     <groupId>org.apache.paimon</groupId>
     <name>Paimon : </name>
-    <version>1.3-SNAPSHOT</version>
+    <version>1.3.1-atlassian-8</version>
     <packaging>pom</packaging>
 
     <url>https://paimon.apache.org</url>
@@ -293,6 +293,17 @@ under the License.
             </dependency>
         </dependencies>
     </dependencyManagement>
+
+    <distributionManagement>
+        <repository>
+            <id>atlassian-3rdparty</id>
+            <url>https://packages.atlassian.com/maven/3rdparty</url>
+        </repository>
+        <snapshotRepository>
+            <id>atlassian-3rdparty</id>
+            <url>https://packages.atlassian.com/maven/3rdparty</url>
+        </snapshotRepository>
+    </distributionManagement>
 
     <profiles>
         <!--
