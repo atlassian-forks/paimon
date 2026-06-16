@@ -108,6 +108,7 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
     private final Supplier<RecordEqualiser> logDedupEqualSupplier;
     private final MergeFunctionFactory<KeyValue> mfFactory;
     private final CoreOptions options;
+    private final FileStorePathFactory pathFactory;
     private final RowType keyType;
     private final RowType valueType;
     private final RowType partitionType;
@@ -145,6 +146,7 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                 dvMaintainerFactory,
                 tableName);
         this.partitionType = partitionType;
+        this.pathFactory = pathFactory;
         this.keyType = keyType;
         this.valueType = valueType;
         this.commitUser = commitUser;
@@ -290,20 +292,23 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
             if (metricsReporter != null) {
                 rewriter.setMetricsReporter(metricsReporter);
             }
-            return new MergeTreeCompactManager(
-                    compactExecutor,
-                    levels,
-                    compactStrategy,
-                    keyComparator,
-                    options.compactionFileSize(true),
-                    options.numSortedRunStopTrigger(),
-                    rewriter,
-                    metricsReporter,
-                    dvMaintainer,
-                    options.prepareCommitWaitCompaction(),
-                    options.needLookup(),
-                    recordLevelExpire,
-                    options.forceRewriteAllFiles());
+            MergeTreeCompactManager compactManager =
+                    new MergeTreeCompactManager(
+                            compactExecutor,
+                            levels,
+                            compactStrategy,
+                            keyComparator,
+                            options.compactionFileSize(true),
+                            options.numSortedRunStopTrigger(),
+                            rewriter,
+                            metricsReporter,
+                            dvMaintainer,
+                            options.prepareCommitWaitCompaction(),
+                            options.needLookup(),
+                            recordLevelExpire,
+                            options.forceRewriteAllFiles());
+            compactManager.setPartitionBucketInfo(partition, bucket, pathFactory);
+            return compactManager;
         }
     }
 
