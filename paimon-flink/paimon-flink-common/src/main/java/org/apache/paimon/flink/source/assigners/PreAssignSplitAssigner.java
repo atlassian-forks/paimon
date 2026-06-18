@@ -24,6 +24,7 @@ import org.apache.paimon.flink.FlinkRowData;
 import org.apache.paimon.flink.source.FileStoreSourceSplit;
 import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.utils.BinPacking;
+import org.apache.paimon.utils.SerializableFunction;
 
 import org.apache.flink.api.connector.source.SplitEnumeratorContext;
 import org.apache.flink.table.connector.source.DynamicFilteringData;
@@ -40,7 +41,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static org.apache.paimon.flink.utils.TableScanUtils.getSnapshotId;
@@ -60,7 +60,7 @@ public class PreAssignSplitAssigner implements SplitAssigner {
 
     private final AtomicInteger numberOfPendingSplits;
     private final Collection<FileStoreSourceSplit> splits;
-    private final Function<FileStoreSourceSplit, Long> weightFunc;
+    private final SerializableFunction<FileStoreSourceSplit, Long> weightFunc;
 
     public PreAssignSplitAssigner(
             int splitBatchSize,
@@ -73,7 +73,7 @@ public class PreAssignSplitAssigner implements SplitAssigner {
             int splitBatchSize,
             SplitEnumeratorContext<FileStoreSourceSplit> context,
             Collection<FileStoreSourceSplit> splits,
-            Function<FileStoreSourceSplit, Long> weightFunc) {
+            SerializableFunction<FileStoreSourceSplit, Long> weightFunc) {
         this(splitBatchSize, context.currentParallelism(), splits, weightFunc);
     }
 
@@ -98,7 +98,7 @@ public class PreAssignSplitAssigner implements SplitAssigner {
             Collection<FileStoreSourceSplit> splits,
             Projection partitionRowProjection,
             DynamicFilteringData dynamicFilteringData,
-            Function<FileStoreSourceSplit, Long> weightFunc) {
+            SerializableFunction<FileStoreSourceSplit, Long> weightFunc) {
         this(
                 splitBatchSize,
                 parallelism,
@@ -117,7 +117,7 @@ public class PreAssignSplitAssigner implements SplitAssigner {
             int splitBatchSize,
             int parallelism,
             Collection<FileStoreSourceSplit> splits,
-            Function<FileStoreSourceSplit, Long> weightFunc) {
+            SerializableFunction<FileStoreSourceSplit, Long> weightFunc) {
         this.splitBatchSize = splitBatchSize;
         this.parallelism = parallelism;
         this.splits = splits;
@@ -172,7 +172,7 @@ public class PreAssignSplitAssigner implements SplitAssigner {
     private static Map<Integer, LinkedList<FileStoreSourceSplit>> createBatchFairSplitAssignment(
             Collection<FileStoreSourceSplit> splits,
             int numReaders,
-            Function<FileStoreSourceSplit, Long> weightFunc) {
+            SerializableFunction<FileStoreSourceSplit, Long> weightFunc) {
         List<List<FileStoreSourceSplit>> assignmentList =
                 BinPacking.packForFixedBinNumber(splits, weightFunc, numReaders);
         Map<Integer, LinkedList<FileStoreSourceSplit>> assignment = new HashMap<>();

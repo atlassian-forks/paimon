@@ -26,6 +26,7 @@ import org.apache.paimon.flink.source.assigners.SplitAssigner;
 import org.apache.paimon.table.source.InnerTableScan;
 import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.table.source.TableScan;
+import org.apache.paimon.utils.SerializableFunction;
 
 import org.apache.flink.api.connector.source.Boundedness;
 import org.apache.flink.api.connector.source.SplitEnumerator;
@@ -35,8 +36,6 @@ import javax.annotation.Nullable;
 
 import java.util.Collection;
 import java.util.List;
-import java.util.function.Function;
-
 import static org.apache.paimon.flink.FlinkConnectorOptions.SplitAssignMode;
 
 /** Bounded {@link FlinkSource} for reading records. It does not monitor new snapshots. */
@@ -50,7 +49,7 @@ public class StaticFileStoreSource extends FlinkSource {
 
     @Nullable private final DynamicPartitionFilteringInfo dynamicPartitionFilteringInfo;
 
-    private final Function<FileStoreSourceSplit, Long> splitWeightFunc;
+    private final SerializableFunction<FileStoreSourceSplit, Long> splitWeightFunc;
 
     public StaticFileStoreSource(
             ReadBuilder readBuilder,
@@ -65,7 +64,7 @@ public class StaticFileStoreSource extends FlinkSource {
             @Nullable Long limit,
             int splitBatchSize,
             SplitAssignMode splitAssignMode,
-            Function<FileStoreSourceSplit, Long> splitWeightFunc) {
+            SerializableFunction<FileStoreSourceSplit, Long> splitWeightFunc) {
         this(readBuilder, limit, splitBatchSize, splitAssignMode, null, null, splitWeightFunc);
     }
 
@@ -93,7 +92,7 @@ public class StaticFileStoreSource extends FlinkSource {
             SplitAssignMode splitAssignMode,
             @Nullable DynamicPartitionFilteringInfo dynamicPartitionFilteringInfo,
             @Nullable NestedProjectedRowData rowData,
-            Function<FileStoreSourceSplit, Long> splitWeightFunc) {
+            SerializableFunction<FileStoreSourceSplit, Long> splitWeightFunc) {
         super(readBuilder, limit, rowData);
         this.splitBatchSize = splitBatchSize;
         this.splitAssignMode = splitAssignMode;
@@ -148,7 +147,7 @@ public class StaticFileStoreSource extends FlinkSource {
             int splitBatchSize,
             SplitAssignMode splitAssignMode,
             Collection<FileStoreSourceSplit> splits,
-            Function<FileStoreSourceSplit, Long> splitWeightFunc) {
+            SerializableFunction<FileStoreSourceSplit, Long> splitWeightFunc) {
         switch (splitAssignMode) {
             case FAIR:
                 return new PreAssignSplitAssigner(splitBatchSize, context, splits, splitWeightFunc);
