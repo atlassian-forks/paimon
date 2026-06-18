@@ -189,9 +189,20 @@ public class CompactAction extends TableActionBase {
                     };
             table = table.copy(dynamicOptions);
         }
+        boolean bucketSizeBalancedDistribution =
+                fullCompaction
+                        && !isStreaming
+                        && table.coreOptions()
+                                .toConfiguration()
+                                .get(
+                                        FlinkConnectorOptions
+                                                .COMPACTION_BUCKET_SIZE_BALANCED_DISTRIBUTION);
         CompactorSourceBuilder sourceBuilder =
-                new CompactorSourceBuilder(identifier.getFullName(), table);
-        CompactorSinkBuilder sinkBuilder = new CompactorSinkBuilder(table, fullCompaction);
+                new CompactorSourceBuilder(identifier.getFullName(), table)
+                        .withBucketSizeBalancedDistribution(bucketSizeBalancedDistribution);
+        CompactorSinkBuilder sinkBuilder =
+                new CompactorSinkBuilder(table, fullCompaction)
+                        .withBucketSizeBalancedDistribution(bucketSizeBalancedDistribution);
 
         sourceBuilder.withPartitionPredicate(getPartitionPredicate());
         DataStreamSource<RowData> source =

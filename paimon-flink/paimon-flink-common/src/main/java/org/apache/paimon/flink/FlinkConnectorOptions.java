@@ -118,6 +118,16 @@ public class FlinkConnectorOptions {
                                     + "By default, if this option is not defined, the planner will derive the parallelism "
                                     + "for each statement individually by also considering the global configuration.");
 
+    public static final ConfigOption<Boolean> COMPACTION_BUCKET_SIZE_BALANCED_DISTRIBUTION =
+            ConfigOptions.key("compaction.bucket-size-balanced-distribution")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Whether to distribute batch full-compaction buckets to writers by bucket file size. "
+                                    + "This is only applied to dedicated batch full compaction jobs. If enabled, "
+                                    + "the compact source assigns bucket splits by total data file size and forwards "
+                                    + "them to writers to reduce compaction long tail.");
+
     public static final ConfigOption<Boolean> INFER_SCAN_PARALLELISM =
             ConfigOptions.key("scan.infer-parallelism")
                     .booleanType()

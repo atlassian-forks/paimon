@@ -266,10 +266,21 @@ public class CompactDatabaseAction extends ActionBase {
             table = table.copy(dynamicOptions);
         }
 
+        boolean bucketSizeBalancedDistribution =
+                fullCompaction
+                        && !isStreaming
+                        && table.coreOptions()
+                                .toConfiguration()
+                                .get(
+                                        FlinkConnectorOptions
+                                                .COMPACTION_BUCKET_SIZE_BALANCED_DISTRIBUTION);
         CompactorSourceBuilder sourceBuilder =
                 new CompactorSourceBuilder(fullName, table)
-                        .withPartitionIdleTime(partitionIdleTime);
-        CompactorSinkBuilder sinkBuilder = new CompactorSinkBuilder(table, fullCompaction);
+                        .withPartitionIdleTime(partitionIdleTime)
+                        .withBucketSizeBalancedDistribution(bucketSizeBalancedDistribution);
+        CompactorSinkBuilder sinkBuilder =
+                new CompactorSinkBuilder(table, fullCompaction)
+                        .withBucketSizeBalancedDistribution(bucketSizeBalancedDistribution);
 
         DataStreamSource<RowData> source =
                 sourceBuilder.withEnv(env).withContinuousMode(isStreaming).build();
