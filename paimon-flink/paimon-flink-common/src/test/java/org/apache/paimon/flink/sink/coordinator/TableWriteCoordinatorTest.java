@@ -21,6 +21,7 @@ package org.apache.paimon.flink.sink.coordinator;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.GenericRow;
+import org.apache.paimon.flink.FlinkConnectorOptions;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.TableTestBase;
@@ -64,6 +65,40 @@ class TableWriteCoordinatorTest extends TableTestBase {
         ScanCoordinationResponse scan = coordinator.scan(request);
         assertThat(scan.snapshot().id()).isEqualTo(latest.id());
         assertThat(scan.extractDataFiles().size()).isEqualTo(initSnapshot ? 2 : 1);
+    }
+
+    @Test
+    public void testPrefetchManifestsWarmsCache() throws Exception {
+        Identifier identifier = new Identifier("db", "table");
+        Schema schema =
+                Schema.newBuilder()
+                        .column("f0", DataTypes.INT())
+                        .option(
+                                FlinkConnectorOptions.SINK_WRITER_COORDINATOR_PREFETCH_MANIFESTS
+                                        .key(),
+                                "true")
+                        .build();
+        catalog.createDatabase("db", false);
+        catalog.createTable(identifier, schema, false);
+        FileStoreTable table = getTable(identifier);
+
+        write(table, GenericRow.of(1));
+        write(table, GenericRow.of(2));
+
+        // the manifest cache starts cold
+        assertThat(table.getManifestCache().totalCacheBytes()).isZero();
+
+        // constructing the coordinator runs refresh() which warms the manifest cache when the
+        // prefetch option is enabled
+        TableWriteCoordinator coordinator = new TableWriteCoordinator(table);
+        assertThat(table.getManifestCache().totalCacheBytes()).isGreaterThan(0);
+
+        // scan results remain correct after warming
+        ScanCoordinationRequest request =
+                new ScanCoordinationRequest(serializeBinaryRow(EMPTY_ROW), 0, false, false);
+        ScanCoordinationResponse scan = coordinator.scan(request);
+        assertThat(scan.snapshot().id()).isEqualTo(table.latestSnapshot().get().id());
+        assertThat(scan.extractDataFiles().size()).isEqualTo(2);
     }
 
     @Test

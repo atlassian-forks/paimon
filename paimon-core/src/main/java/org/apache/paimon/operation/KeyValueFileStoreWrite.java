@@ -50,7 +50,6 @@ import org.apache.paimon.mergetree.LookupLevels.KeyValueProcessor;
 import org.apache.paimon.mergetree.LookupLevels.PositionedKeyValueProcessor;
 import org.apache.paimon.mergetree.MergeSorter;
 import org.apache.paimon.mergetree.MergeTreeWriter;
-import org.apache.paimon.mergetree.compact.CompactRewriter;
 import org.apache.paimon.mergetree.compact.CompactStrategy;
 import org.apache.paimon.mergetree.compact.ForceUpLevel0Compaction;
 import org.apache.paimon.mergetree.compact.FullChangelogMergeTreeCompactRewriter;
@@ -64,6 +63,7 @@ import org.apache.paimon.mergetree.compact.MergeTreeCompactManager;
 import org.apache.paimon.mergetree.compact.MergeTreeCompactRewriter;
 import org.apache.paimon.mergetree.compact.OffPeakHours;
 import org.apache.paimon.mergetree.compact.UniversalCompaction;
+import org.apache.paimon.operation.metrics.CompactionMetrics;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.schema.KeyValueFieldsExtractor;
 import org.apache.paimon.schema.SchemaManager;
@@ -108,6 +108,7 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
     private final Supplier<RecordEqualiser> logDedupEqualSupplier;
     private final MergeFunctionFactory<KeyValue> mfFactory;
     private final CoreOptions options;
+    private final FileStorePathFactory pathFactory;
     private final RowType keyType;
     private final RowType valueType;
     private final RowType partitionType;
@@ -145,6 +146,7 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                 dvMaintainerFactory,
                 tableName);
         this.partitionType = partitionType;
+        this.pathFactory = pathFactory;
         this.keyType = keyType;
         this.valueType = valueType;
         this.commitUser = commitUser;
@@ -275,7 +277,7 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
         } else {
             Comparator<InternalRow> keyComparator = keyComparatorSupplier.get();
             @Nullable FieldsComparator userDefinedSeqComparator = udsComparatorSupplier.get();
-            CompactRewriter rewriter =
+            MergeTreeCompactRewriter rewriter =
                     createRewriter(
                             partition,
                             bucket,
@@ -283,22 +285,30 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                             userDefinedSeqComparator,
                             levels,
                             dvMaintainer);
-            return new MergeTreeCompactManager(
-                    compactExecutor,
-                    levels,
-                    compactStrategy,
-                    keyComparator,
-                    options.compactionFileSize(true),
-                    options.numSortedRunStopTrigger(),
-                    rewriter,
+            CompactionMetrics.Reporter metricsReporter =
                     compactionMetrics == null
                             ? null
-                            : compactionMetrics.createReporter(partition, bucket),
-                    dvMaintainer,
-                    options.prepareCommitWaitCompaction(),
-                    options.needLookup(),
-                    recordLevelExpire,
-                    options.forceRewriteAllFiles());
+                            : compactionMetrics.createReporter(partition, bucket);
+            if (metricsReporter != null) {
+                rewriter.setMetricsReporter(metricsReporter);
+            }
+            MergeTreeCompactManager compactManager =
+                    new MergeTreeCompactManager(
+                            compactExecutor,
+                            levels,
+                            compactStrategy,
+                            keyComparator,
+                            options.compactionFileSize(true),
+                            options.numSortedRunStopTrigger(),
+                            rewriter,
+                            metricsReporter,
+                            dvMaintainer,
+                            options.prepareCommitWaitCompaction(),
+                            options.needLookup(),
+                            recordLevelExpire,
+                            options.forceRewriteAllFiles());
+            compactManager.setPartitionBucketInfo(partition, bucket, pathFactory);
+            return compactManager;
         }
     }
 
