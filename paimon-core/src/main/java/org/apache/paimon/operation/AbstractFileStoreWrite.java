@@ -690,7 +690,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                         + fileSize(compactIncrement.changelogFiles()));
     }
 
-    private String readablePartition(BinaryRow partition) {
+    protected String readablePartition(BinaryRow partition) {
         if (partitionType.getFieldCount() == 0) {
             return "<unpartitioned>";
         }
