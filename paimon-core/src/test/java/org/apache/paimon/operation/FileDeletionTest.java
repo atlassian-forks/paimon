@@ -71,6 +71,7 @@ import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
+import static org.apache.paimon.CoreOptions.BUCKET;
 import static org.apache.paimon.CoreOptions.SNAPSHOT_CLEAN_EMPTY_DIRECTORIES;
 import static org.apache.paimon.operation.FileStoreCommitImpl.mustConflictCheck;
 import static org.apache.paimon.operation.FileStoreTestUtils.assertNFilesExists;
@@ -867,6 +868,9 @@ public class FileDeletionTest {
         }
 
         SchemaManager schemaManager = new SchemaManager(fileIO, new Path(root));
+        Map<String, String> schemaOptions = new HashMap<>();
+        schemaOptions.put(SNAPSHOT_CLEAN_EMPTY_DIRECTORIES.key(), "true");
+        schemaOptions.put(BUCKET.key(), String.valueOf(buckets));
 
         TableSchema tableSchema =
                 schemaManager.createTable(
@@ -874,8 +878,7 @@ public class FileDeletionTest {
                                 rowType.getFields(),
                                 partitionType.getFieldNames(),
                                 TestKeyValueGenerator.getPrimaryKeys(mode),
-                                Collections.singletonMap(
-                                        SNAPSHOT_CLEAN_EMPTY_DIRECTORIES.key(), "true"),
+                                schemaOptions,
                                 null));
 
         return new TestFileStore.Builder(
