@@ -29,6 +29,7 @@ import org.apache.flink.table.data.RowData;
 
 import java.util.Optional;
 
+import static org.apache.paimon.CoreOptions.createCommitUser;
 import static org.apache.paimon.flink.sink.FlinkStreamPartitioner.partition;
 
 /** Builder for {@link CompactorSink}. */
@@ -78,7 +79,9 @@ public class CompactorSinkBuilder {
                         .orElse(null);
         switch (bucketDistributionStrategy) {
             case SIZE_AWARE_BATCH:
-                return new CompactorSink(table, fullCompaction).sinkFrom(input);
+                CompactorSink sink = new CompactorSink(table, fullCompaction);
+                String commitUser = createCommitUser(table.coreOptions().toConfiguration());
+                return sink.doCommit(sink.doWrite(input, commitUser, null).startNewChain(), commitUser);
             case LINEAR:
             default:
                 DataStream<RowData> partitioned =
