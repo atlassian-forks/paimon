@@ -22,10 +22,13 @@ import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.flink.FlinkConnectorOptions;
+import org.apache.paimon.fs.Path;
+import org.apache.paimon.options.MemorySize;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.TableTestBase;
 import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.utils.SegmentsCache;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -85,10 +88,13 @@ class TableWriteCoordinatorTest extends TableTestBase {
         write(table, GenericRow.of(1));
         write(table, GenericRow.of(2));
 
-        // the manifest cache starts cold
+        // Writing might already touch manifest files, so replace the table cache with a fresh one
+        // to make this test focus only on coordinator prefetch behavior.
+        table.setManifestCache(
+                new SegmentsCache<Path>(1024, MemorySize.ofMebiBytes(64), Long.MAX_VALUE));
         assertThat(table.getManifestCache().totalCacheBytes()).isZero();
 
-        // constructing the coordinator runs refresh() which warms the manifest cache when the
+        // Constructing the coordinator runs refresh() which warms the manifest cache when the
         // prefetch option is enabled
         TableWriteCoordinator coordinator = new TableWriteCoordinator(table);
         assertThat(table.getManifestCache().totalCacheBytes()).isGreaterThan(0);
