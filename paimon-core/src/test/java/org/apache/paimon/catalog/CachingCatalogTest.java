@@ -66,8 +66,10 @@ import static java.util.Collections.singletonList;
 import static org.apache.paimon.data.BinaryString.fromString;
 import static org.apache.paimon.options.CatalogOptions.CACHE_EXPIRE_AFTER_ACCESS;
 import static org.apache.paimon.options.CatalogOptions.CACHE_MANIFEST_MAX_MEMORY;
+import static org.apache.paimon.options.CatalogOptions.CACHE_MANIFEST_PAGE_SIZE;
 import static org.apache.paimon.options.CatalogOptions.CACHE_MANIFEST_SMALL_FILE_MEMORY;
 import static org.apache.paimon.options.CatalogOptions.CACHE_MANIFEST_SMALL_FILE_THRESHOLD;
+import static org.apache.paimon.options.CatalogOptions.CACHE_MANIFEST_SOFT_VALUES;
 import static org.apache.paimon.options.CatalogOptions.CACHE_PARTITION_MAX_NUM;
 import static org.apache.paimon.options.CatalogOptions.CACHE_SNAPSHOT_MAX_NUM_PER_TABLE;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -485,6 +487,8 @@ class CachingCatalogTest extends CatalogTestBase {
                 .isEqualTo(CACHE_MANIFEST_SMALL_FILE_MEMORY.defaultValue());
         assertThat(caching.manifestCache.maxElementSize())
                 .isEqualTo(CACHE_MANIFEST_SMALL_FILE_THRESHOLD.defaultValue().getBytes());
+        assertThat(caching.manifestCache.pageSize())
+                .isEqualTo((int) CACHE_MANIFEST_PAGE_SIZE.defaultValue().getBytes());
 
         options.set(CACHE_MANIFEST_SMALL_FILE_MEMORY, MemorySize.ofMebiBytes(100));
         options.set(CACHE_MANIFEST_SMALL_FILE_THRESHOLD, MemorySize.ofBytes(100));
@@ -496,5 +500,19 @@ class CachingCatalogTest extends CatalogTestBase {
         caching = (CachingCatalog) CachingCatalog.tryToCreate(catalog, options);
         assertThat(caching.manifestCache.maxMemorySize()).isEqualTo(MemorySize.ofMebiBytes(256));
         assertThat(caching.manifestCache.maxElementSize()).isEqualTo(Long.MAX_VALUE);
+
+        options.set(CACHE_MANIFEST_PAGE_SIZE, MemorySize.ofKibiBytes(2));
+        caching = (CachingCatalog) CachingCatalog.tryToCreate(catalog, options);
+        assertThat(caching.manifestCache.pageSize())
+                .isEqualTo((int) MemorySize.ofKibiBytes(2).getBytes());
+
+        // soft values default to on and the cache inherits the catalog idle TTL
+        assertThat(caching.manifestCache.softValues()).isTrue();
+        assertThat(caching.manifestCache.ttl()).isEqualTo(CACHE_EXPIRE_AFTER_ACCESS.defaultValue());
+
+        // soft values can be turned off to opt into strong references
+        options.set(CACHE_MANIFEST_SOFT_VALUES, false);
+        caching = (CachingCatalog) CachingCatalog.tryToCreate(catalog, options);
+        assertThat(caching.manifestCache.softValues()).isFalse();
     }
 }

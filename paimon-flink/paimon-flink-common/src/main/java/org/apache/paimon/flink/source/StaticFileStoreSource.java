@@ -26,6 +26,7 @@ import org.apache.paimon.flink.source.assigners.SplitAssigner;
 import org.apache.paimon.table.source.InnerTableScan;
 import org.apache.paimon.table.source.ReadBuilder;
 import org.apache.paimon.table.source.TableScan;
+import org.apache.paimon.utils.SerializableFunction;
 
 import org.apache.flink.api.connector.source.Boundedness;
 import org.apache.flink.api.connector.source.SplitEnumerator;
@@ -49,6 +50,8 @@ public class StaticFileStoreSource extends FlinkSource {
 
     @Nullable private final DynamicPartitionFilteringInfo dynamicPartitionFilteringInfo;
 
+    private final SerializableFunction<FileStoreSourceSplit, Long> splitWeightFunc;
+
     public StaticFileStoreSource(
             ReadBuilder readBuilder,
             @Nullable Long limit,
@@ -62,12 +65,40 @@ public class StaticFileStoreSource extends FlinkSource {
             @Nullable Long limit,
             int splitBatchSize,
             SplitAssignMode splitAssignMode,
+            SerializableFunction<FileStoreSourceSplit, Long> splitWeightFunc) {
+        this(readBuilder, limit, splitBatchSize, splitAssignMode, null, null, splitWeightFunc);
+    }
+
+    public StaticFileStoreSource(
+            ReadBuilder readBuilder,
+            @Nullable Long limit,
+            int splitBatchSize,
+            SplitAssignMode splitAssignMode,
             @Nullable DynamicPartitionFilteringInfo dynamicPartitionFilteringInfo,
             @Nullable NestedProjectedRowData rowData) {
+        this(
+                readBuilder,
+                limit,
+                splitBatchSize,
+                splitAssignMode,
+                dynamicPartitionFilteringInfo,
+                rowData,
+                split -> split.split().rowCount());
+    }
+
+    public StaticFileStoreSource(
+            ReadBuilder readBuilder,
+            @Nullable Long limit,
+            int splitBatchSize,
+            SplitAssignMode splitAssignMode,
+            @Nullable DynamicPartitionFilteringInfo dynamicPartitionFilteringInfo,
+            @Nullable NestedProjectedRowData rowData,
+            SerializableFunction<FileStoreSourceSplit, Long> splitWeightFunc) {
         super(readBuilder, limit, rowData);
         this.splitBatchSize = splitBatchSize;
         this.splitAssignMode = splitAssignMode;
         this.dynamicPartitionFilteringInfo = dynamicPartitionFilteringInfo;
+        this.splitWeightFunc = splitWeightFunc;
     }
 
     @Override
@@ -82,7 +113,8 @@ public class StaticFileStoreSource extends FlinkSource {
         Collection<FileStoreSourceSplit> splits =
                 checkpoint == null ? getSplits(context) : checkpoint.splits();
         SplitAssigner splitAssigner =
-                createSplitAssigner(context, splitBatchSize, splitAssignMode, splits);
+                createSplitAssigner(
+                        context, splitBatchSize, splitAssignMode, splits, splitWeightFunc);
         return new StaticFileStoreSplitEnumerator(
                 context, null, splitAssigner, dynamicPartitionFilteringInfo);
     }
@@ -103,9 +135,23 @@ public class StaticFileStoreSource extends FlinkSource {
             int splitBatchSize,
             SplitAssignMode splitAssignMode,
             Collection<FileStoreSourceSplit> splits) {
+        return createSplitAssigner(
+                context,
+                splitBatchSize,
+                splitAssignMode,
+                splits,
+                split -> split.split().rowCount());
+    }
+
+    public static SplitAssigner createSplitAssigner(
+            SplitEnumeratorContext<FileStoreSourceSplit> context,
+            int splitBatchSize,
+            SplitAssignMode splitAssignMode,
+            Collection<FileStoreSourceSplit> splits,
+            SerializableFunction<FileStoreSourceSplit, Long> splitWeightFunc) {
         switch (splitAssignMode) {
             case FAIR:
-                return new PreAssignSplitAssigner(splitBatchSize, context, splits);
+                return new PreAssignSplitAssigner(splitBatchSize, context, splits, splitWeightFunc);
             case PREEMPTIVE:
                 return new FIFOSplitAssigner(splits);
             default:
