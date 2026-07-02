@@ -81,7 +81,8 @@ public class CompactorSinkBuilder {
             case SIZE_AWARE_BATCH:
                 CompactorSink sink = new CompactorSink(table, fullCompaction);
                 String commitUser = createCommitUser(table.coreOptions().toConfiguration());
-                return sink.doCommit(sink.doWrite(input, commitUser, null).startNewChain(), commitUser);
+                return sink.doCommit(
+                        sink.doWrite(input, commitUser, null).startNewChain(), commitUser);
             case LINEAR:
             default:
                 DataStream<RowData> partitioned =
