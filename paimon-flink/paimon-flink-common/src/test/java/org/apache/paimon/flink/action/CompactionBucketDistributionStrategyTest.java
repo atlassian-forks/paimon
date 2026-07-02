@@ -31,8 +31,9 @@ public class CompactionBucketDistributionStrategyTest {
 
     @Test
     public void testDefaultStrategyIsLinear() {
-        assertThat(Options.fromMap(java.util.Collections.emptyMap())
-                        .get(FlinkConnectorOptions.COMPACTION_BUCKET_DISTRIBUTION_STRATEGY))
+        assertThat(
+                        Options.fromMap(java.util.Collections.emptyMap())
+                                .get(FlinkConnectorOptions.COMPACTION_BUCKET_DISTRIBUTION_STRATEGY))
                 .isEqualTo(CompactionBucketDistributionStrategy.LINEAR);
     }
 

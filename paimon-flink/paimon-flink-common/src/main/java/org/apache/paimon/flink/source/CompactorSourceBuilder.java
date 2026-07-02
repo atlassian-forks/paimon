@@ -112,7 +112,7 @@ public class CompactorSourceBuilder {
         } else {
             Options options = compactBucketsTable.coreOptions().toConfiguration();
             return bucketDistributionStrategy
-                                    == CompactionBucketDistributionStrategy.SIZE_AWARE_BATCH
+                            == CompactionBucketDistributionStrategy.SIZE_AWARE_BATCH
                     ? new StaticFileStoreSource(
                             readBuilder,
                             null,

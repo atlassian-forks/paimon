@@ -268,7 +268,8 @@ public class CompactDatabaseAction extends ActionBase {
         }
 
         CompactionBucketDistributionStrategy bucketDistributionStrategy =
-                CompactAction.compactionBucketDistributionStrategy(table, fullCompaction, isStreaming);
+                CompactAction.compactionBucketDistributionStrategy(
+                        table, fullCompaction, isStreaming);
         CompactorSourceBuilder sourceBuilder =
                 new CompactorSourceBuilder(fullName, table)
                         .withPartitionIdleTime(partitionIdleTime)
