@@ -19,6 +19,7 @@
 package org.apache.paimon.flink.sink;
 
 import org.apache.paimon.flink.FlinkConnectorOptions;
+import org.apache.paimon.flink.FlinkConnectorOptions.CompactionBucketDistributionStrategy;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 
@@ -39,7 +40,8 @@ public class CompactorSinkBuilder {
 
     private final boolean fullCompaction;
 
-    private boolean bucketSizeBalancedDistribution = false;
+    private CompactionBucketDistributionStrategy bucketDistributionStrategy =
+            CompactionBucketDistributionStrategy.LINEAR;
 
     public CompactorSinkBuilder(FileStoreTable table, boolean fullCompaction) {
         this.table = table;
@@ -51,9 +53,9 @@ public class CompactorSinkBuilder {
         return this;
     }
 
-    public CompactorSinkBuilder withBucketSizeBalancedDistribution(
-            boolean bucketSizeBalancedDistribution) {
-        this.bucketSizeBalancedDistribution = bucketSizeBalancedDistribution;
+    public CompactorSinkBuilder withBucketDistributionStrategy(
+            CompactionBucketDistributionStrategy bucketDistributionStrategy) {
+        this.bucketDistributionStrategy = bucketDistributionStrategy;
         return this;
     }
 
@@ -74,11 +76,14 @@ public class CompactorSinkBuilder {
                                 table.options().get(FlinkConnectorOptions.SINK_PARALLELISM.key()))
                         .map(Integer::valueOf)
                         .orElse(null);
-        if (bucketSizeBalancedDistribution) {
-            return new CompactorSink(table, fullCompaction).sinkFrom(input);
+        switch (bucketDistributionStrategy) {
+            case SIZE_AWARE_BATCH:
+                return new CompactorSink(table, fullCompaction).sinkFrom(input);
+            case LINEAR:
+            default:
+                DataStream<RowData> partitioned =
+                        partition(input, new BucketsRowChannelComputer(), parallelism);
+                return new CompactorSink(table, fullCompaction).sinkFrom(partitioned);
         }
-        DataStream<RowData> partitioned =
-                partition(input, new BucketsRowChannelComputer(), parallelism);
-        return new CompactorSink(table, fullCompaction).sinkFrom(partitioned);
     }
 }

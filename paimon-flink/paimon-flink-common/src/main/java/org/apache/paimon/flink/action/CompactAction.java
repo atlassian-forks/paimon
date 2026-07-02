@@ -24,6 +24,7 @@ import org.apache.paimon.compact.CompactUnit;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.flink.FlinkConnectorOptions;
+import org.apache.paimon.flink.FlinkConnectorOptions.CompactionBucketDistributionStrategy;
 import org.apache.paimon.flink.cluster.IncrementalClusterSplitSource;
 import org.apache.paimon.flink.cluster.RewriteIncrementalClusterCommittableOperator;
 import org.apache.paimon.flink.compact.AppendTableCompactBuilder;
@@ -167,6 +168,20 @@ public class CompactAction extends TableActionBase {
         }
     }
 
+    static CompactionBucketDistributionStrategy compactionBucketDistributionStrategy(
+            FileStoreTable table, boolean fullCompaction, boolean isStreaming) {
+        return compactionBucketDistributionStrategy(
+                table.coreOptions().toConfiguration(), fullCompaction, isStreaming);
+    }
+
+    static CompactionBucketDistributionStrategy compactionBucketDistributionStrategy(
+            Options options, boolean fullCompaction, boolean isStreaming) {
+        if (!fullCompaction || isStreaming) {
+            return CompactionBucketDistributionStrategy.LINEAR;
+        }
+        return options.get(FlinkConnectorOptions.COMPACTION_BUCKET_DISTRIBUTION_STRATEGY);
+    }
+
     private void buildForBucketedTableCompact(
             StreamExecutionEnvironment env, FileStoreTable table, boolean isStreaming)
             throws Exception {
@@ -189,20 +204,14 @@ public class CompactAction extends TableActionBase {
                     };
             table = table.copy(dynamicOptions);
         }
-        boolean bucketSizeBalancedDistribution =
-                fullCompaction
-                        && !isStreaming
-                        && table.coreOptions()
-                                .toConfiguration()
-                                .get(
-                                        FlinkConnectorOptions
-                                                .COMPACTION_BUCKET_SIZE_BALANCED_DISTRIBUTION);
+        CompactionBucketDistributionStrategy bucketDistributionStrategy =
+                compactionBucketDistributionStrategy(table, fullCompaction, isStreaming);
         CompactorSourceBuilder sourceBuilder =
                 new CompactorSourceBuilder(identifier.getFullName(), table)
-                        .withBucketSizeBalancedDistribution(bucketSizeBalancedDistribution);
+                        .withBucketDistributionStrategy(bucketDistributionStrategy);
         CompactorSinkBuilder sinkBuilder =
                 new CompactorSinkBuilder(table, fullCompaction)
-                        .withBucketSizeBalancedDistribution(bucketSizeBalancedDistribution);
+                        .withBucketDistributionStrategy(bucketDistributionStrategy);
 
         sourceBuilder.withPartitionPredicate(getPartitionPredicate());
         DataStreamSource<RowData> source =

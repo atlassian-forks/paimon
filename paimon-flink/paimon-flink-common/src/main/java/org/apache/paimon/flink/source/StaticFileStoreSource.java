@@ -36,6 +36,7 @@ import javax.annotation.Nullable;
 
 import java.util.Collection;
 import java.util.List;
+
 import static org.apache.paimon.flink.FlinkConnectorOptions.SplitAssignMode;
 
 /** Bounded {@link FlinkSource} for reading records. It does not monitor new snapshots. */

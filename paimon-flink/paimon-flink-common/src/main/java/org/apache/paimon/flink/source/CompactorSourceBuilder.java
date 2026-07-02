@@ -21,6 +21,7 @@ package org.apache.paimon.flink.source;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.flink.FlinkConnectorOptions;
+import org.apache.paimon.flink.FlinkConnectorOptions.CompactionBucketDistributionStrategy;
 import org.apache.paimon.flink.LogicalTypeConversion;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.manifest.PartitionEntry;
@@ -66,7 +67,8 @@ public class CompactorSourceBuilder {
     private StreamExecutionEnvironment env;
     @Nullable private PartitionPredicate partitionPredicate = null;
     @Nullable private Duration partitionIdleTime = null;
-    private boolean bucketSizeBalancedDistribution = false;
+    private CompactionBucketDistributionStrategy bucketDistributionStrategy =
+            CompactionBucketDistributionStrategy.LINEAR;
 
     public CompactorSourceBuilder(String tableIdentifier, FileStoreTable table) {
         this.tableIdentifier = tableIdentifier;
@@ -88,9 +90,9 @@ public class CompactorSourceBuilder {
         return this;
     }
 
-    public CompactorSourceBuilder withBucketSizeBalancedDistribution(
-            boolean bucketSizeBalancedDistribution) {
-        this.bucketSizeBalancedDistribution = bucketSizeBalancedDistribution;
+    public CompactorSourceBuilder withBucketDistributionStrategy(
+            CompactionBucketDistributionStrategy bucketDistributionStrategy) {
+        this.bucketDistributionStrategy = bucketDistributionStrategy;
         return this;
     }
 
@@ -109,7 +111,8 @@ public class CompactorSourceBuilder {
             return new ContinuousFileStoreSource(readBuilder, compactBucketsTable.options(), null);
         } else {
             Options options = compactBucketsTable.coreOptions().toConfiguration();
-            return bucketSizeBalancedDistribution
+            return bucketDistributionStrategy
+                                    == CompactionBucketDistributionStrategy.SIZE_AWARE_BATCH
                     ? new StaticFileStoreSource(
                             readBuilder,
                             null,
@@ -157,20 +160,26 @@ public class CompactorSourceBuilder {
             dataStream = new DataStreamSource<>(filterStream);
         }
         Options tableOptions = Options.fromMap(table.options());
-        Integer parallelism = tableOptions.get(FlinkConnectorOptions.SCAN_PARALLELISM);
-        if (bucketSizeBalancedDistribution) {
-            Integer sinkParallelism = tableOptions.get(FlinkConnectorOptions.SINK_PARALLELISM);
-            if (sinkParallelism != null) {
-                parallelism = sinkParallelism;
-            }
-        }
+        Integer parallelism = sourceParallelism(tableOptions, bucketDistributionStrategy);
         if (parallelism != null) {
             dataStream.setParallelism(parallelism);
         }
         return dataStream;
     }
 
-    private long bucketFileSize(DataSplit split) {
+    static Integer sourceParallelism(
+            Options tableOptions, CompactionBucketDistributionStrategy bucketDistributionStrategy) {
+        Integer parallelism = tableOptions.get(FlinkConnectorOptions.SCAN_PARALLELISM);
+        if (bucketDistributionStrategy == CompactionBucketDistributionStrategy.SIZE_AWARE_BATCH) {
+            Integer sinkParallelism = tableOptions.get(FlinkConnectorOptions.SINK_PARALLELISM);
+            if (sinkParallelism != null) {
+                parallelism = sinkParallelism;
+            }
+        }
+        return parallelism;
+    }
+
+    static long bucketFileSize(DataSplit split) {
         return split.dataFiles().stream().mapToLong(DataFileMeta::fileSize).sum();
     }
 

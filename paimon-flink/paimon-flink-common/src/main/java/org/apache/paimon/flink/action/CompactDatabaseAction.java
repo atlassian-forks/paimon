@@ -23,6 +23,7 @@ import org.apache.paimon.append.MultiTableAppendCompactTask;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.flink.FlinkConnectorOptions;
+import org.apache.paimon.flink.FlinkConnectorOptions.CompactionBucketDistributionStrategy;
 import org.apache.paimon.flink.compact.AppendTableCompactBuilder;
 import org.apache.paimon.flink.sink.BucketsRowChannelComputer;
 import org.apache.paimon.flink.sink.CombinedTableCompactorSink;
@@ -266,21 +267,15 @@ public class CompactDatabaseAction extends ActionBase {
             table = table.copy(dynamicOptions);
         }
 
-        boolean bucketSizeBalancedDistribution =
-                fullCompaction
-                        && !isStreaming
-                        && table.coreOptions()
-                                .toConfiguration()
-                                .get(
-                                        FlinkConnectorOptions
-                                                .COMPACTION_BUCKET_SIZE_BALANCED_DISTRIBUTION);
+        CompactionBucketDistributionStrategy bucketDistributionStrategy =
+                CompactAction.compactionBucketDistributionStrategy(table, fullCompaction, isStreaming);
         CompactorSourceBuilder sourceBuilder =
                 new CompactorSourceBuilder(fullName, table)
                         .withPartitionIdleTime(partitionIdleTime)
-                        .withBucketSizeBalancedDistribution(bucketSizeBalancedDistribution);
+                        .withBucketDistributionStrategy(bucketDistributionStrategy);
         CompactorSinkBuilder sinkBuilder =
                 new CompactorSinkBuilder(table, fullCompaction)
-                        .withBucketSizeBalancedDistribution(bucketSizeBalancedDistribution);
+                        .withBucketDistributionStrategy(bucketDistributionStrategy);
 
         DataStreamSource<RowData> source =
                 sourceBuilder.withEnv(env).withContinuousMode(isStreaming).build();
