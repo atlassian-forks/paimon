@@ -50,6 +50,7 @@ import java.time.ZoneId;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 import static org.apache.paimon.utils.SerializationUtils.deserializeBinaryRow;
@@ -118,7 +119,10 @@ public class CompactorSourceBuilder {
                             null,
                             options.get(FlinkConnectorOptions.SCAN_SPLIT_ENUMERATOR_BATCH_SIZE),
                             options.get(FlinkConnectorOptions.SCAN_SPLIT_ENUMERATOR_ASSIGN_MODE),
-                            split -> bucketFileSize((DataSplit) split.split()))
+                            null,
+                            null,
+                            split -> bucketFileSize((DataSplit) split.split()),
+                            split -> bucketKey((DataSplit) split.split()))
                     : new StaticFileStoreSource(
                             readBuilder,
                             null,
@@ -181,6 +185,38 @@ public class CompactorSourceBuilder {
 
     static long bucketFileSize(DataSplit split) {
         return split.dataFiles().stream().mapToLong(DataFileMeta::fileSize).sum();
+    }
+
+    static BucketKey bucketKey(DataSplit split) {
+        return new BucketKey(split.partition().copy(), split.bucket());
+    }
+
+    static class BucketKey {
+
+        private final BinaryRow partition;
+        private final int bucket;
+
+        private BucketKey(BinaryRow partition, int bucket) {
+            this.partition = partition;
+            this.bucket = bucket;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof BucketKey)) {
+                return false;
+            }
+            BucketKey bucketKey = (BucketKey) o;
+            return bucket == bucketKey.bucket && Objects.equals(partition, bucketKey.partition);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(partition, bucket);
+        }
     }
 
     private Map<String, String> streamingCompactOptions() {
