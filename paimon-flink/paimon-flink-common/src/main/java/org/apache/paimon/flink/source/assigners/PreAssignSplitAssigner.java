@@ -62,6 +62,8 @@ public class PreAssignSplitAssigner implements SplitAssigner {
     private final Collection<FileStoreSourceSplit> splits;
     private final SerializableFunction<FileStoreSourceSplit, Long> weightFunc;
 
+    @Nullable private final SerializableFunction<FileStoreSourceSplit, ?> groupFunc;
+
     public PreAssignSplitAssigner(
             int splitBatchSize,
             SplitEnumeratorContext<FileStoreSourceSplit> context,
@@ -75,6 +77,15 @@ public class PreAssignSplitAssigner implements SplitAssigner {
             Collection<FileStoreSourceSplit> splits,
             SerializableFunction<FileStoreSourceSplit, Long> weightFunc) {
         this(splitBatchSize, context.currentParallelism(), splits, weightFunc);
+    }
+
+    public PreAssignSplitAssigner(
+            int splitBatchSize,
+            SplitEnumeratorContext<FileStoreSourceSplit> context,
+            Collection<FileStoreSourceSplit> splits,
+            SerializableFunction<FileStoreSourceSplit, Long> weightFunc,
+            @Nullable SerializableFunction<FileStoreSourceSplit, ?> groupFunc) {
+        this(splitBatchSize, context.currentParallelism(), splits, weightFunc, groupFunc);
     }
 
     public PreAssignSplitAssigner(
@@ -118,12 +129,22 @@ public class PreAssignSplitAssigner implements SplitAssigner {
             int parallelism,
             Collection<FileStoreSourceSplit> splits,
             SerializableFunction<FileStoreSourceSplit, Long> weightFunc) {
+        this(splitBatchSize, parallelism, splits, weightFunc, null);
+    }
+
+    public PreAssignSplitAssigner(
+            int splitBatchSize,
+            int parallelism,
+            Collection<FileStoreSourceSplit> splits,
+            SerializableFunction<FileStoreSourceSplit, Long> weightFunc,
+            @Nullable SerializableFunction<FileStoreSourceSplit, ?> groupFunc) {
         this.splitBatchSize = splitBatchSize;
         this.parallelism = parallelism;
         this.splits = splits;
         this.weightFunc = weightFunc;
+        this.groupFunc = groupFunc;
         this.pendingSplitAssignment =
-                createBatchFairSplitAssignment(splits, parallelism, weightFunc);
+                createBatchFairSplitAssignment(splits, parallelism, weightFunc, groupFunc);
         this.numberOfPendingSplits = new AtomicInteger(splits.size());
     }
 
@@ -172,14 +193,58 @@ public class PreAssignSplitAssigner implements SplitAssigner {
     private static Map<Integer, LinkedList<FileStoreSourceSplit>> createBatchFairSplitAssignment(
             Collection<FileStoreSourceSplit> splits,
             int numReaders,
-            SerializableFunction<FileStoreSourceSplit, Long> weightFunc) {
-        List<List<FileStoreSourceSplit>> assignmentList =
-                BinPacking.packForFixedBinNumber(splits, weightFunc, numReaders);
+            SerializableFunction<FileStoreSourceSplit, Long> weightFunc,
+            @Nullable SerializableFunction<FileStoreSourceSplit, ?> groupFunc) {
         Map<Integer, LinkedList<FileStoreSourceSplit>> assignment = new HashMap<>();
-        for (int i = 0; i < assignmentList.size(); i++) {
-            assignment.put(i, new LinkedList<>(assignmentList.get(i)));
+        if (groupFunc == null) {
+            List<List<FileStoreSourceSplit>> assignmentList =
+                    BinPacking.packForFixedBinNumber(splits, weightFunc, numReaders);
+            for (int i = 0; i < assignmentList.size(); i++) {
+                assignment.put(i, new LinkedList<>(assignmentList.get(i)));
+            }
+        } else {
+            List<SplitGroup> splitGroups = createSplitGroups(splits, weightFunc, groupFunc);
+            List<List<SplitGroup>> assignmentList =
+                    BinPacking.packForFixedBinNumber(splitGroups, SplitGroup::weight, numReaders);
+            for (int i = 0; i < assignmentList.size(); i++) {
+                LinkedList<FileStoreSourceSplit> assignedSplits = new LinkedList<>();
+                assignmentList.get(i).forEach(group -> assignedSplits.addAll(group.splits()));
+                assignment.put(i, assignedSplits);
+            }
         }
         return assignment;
+    }
+
+    private static List<SplitGroup> createSplitGroups(
+            Collection<FileStoreSourceSplit> splits,
+            SerializableFunction<FileStoreSourceSplit, Long> weightFunc,
+            SerializableFunction<FileStoreSourceSplit, ?> groupFunc) {
+        Map<Object, SplitGroup> groups = new HashMap<>();
+        for (FileStoreSourceSplit split : splits) {
+            Object key = groupFunc.apply(split);
+            groups.computeIfAbsent(key, ignored -> new SplitGroup())
+                    .add(split, weightFunc.apply(split));
+        }
+        return new ArrayList<>(groups.values());
+    }
+
+    private static class SplitGroup {
+
+        private final List<FileStoreSourceSplit> splits = new ArrayList<>();
+        private long weight;
+
+        private void add(FileStoreSourceSplit split, long splitWeight) {
+            splits.add(split);
+            weight += splitWeight;
+        }
+
+        private List<FileStoreSourceSplit> splits() {
+            return splits;
+        }
+
+        private long weight() {
+            return weight;
+        }
     }
 
     @Override
