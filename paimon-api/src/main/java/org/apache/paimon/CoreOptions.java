@@ -1810,6 +1810,15 @@ public class CoreOptions implements Serializable {
                                     + " This is useful for jobs that write to or compacts many partitions at once,"
                                     + " however more memory is required as the entire manifest is loaded.");
 
+    public static final ConfigOption<Boolean> PARTITION_BUCKET_MAPPING_CACHE_ENABLED =
+            key("partition-bucket-mapping.cache-enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "If true, cache partition bucket mappings in the current JVM when initializing writers."
+                                    + " This avoids repeated manifest scans by multiple writers in the same TaskManager,"
+                                    + " but the cached mapping is shared until the table snapshot changes.");
+
     public static final ConfigOption<Boolean> DATA_FILE_THIN_MODE =
             key("data-file.thin-mode")
                     .booleanType()
@@ -2548,6 +2557,10 @@ public class CoreOptions implements Serializable {
 
     public boolean prefetchManifestEntries() {
         return options.get(MANIFEST_PREFETCH_ENTRIES);
+    }
+
+    public boolean partitionBucketMappingCacheEnabled() {
+        return options.get(PARTITION_BUCKET_MAPPING_CACHE_ENABLED);
     }
 
     public boolean disableNullToNotNull() {

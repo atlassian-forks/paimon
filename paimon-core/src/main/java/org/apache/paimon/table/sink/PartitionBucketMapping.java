@@ -29,6 +29,10 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.function.Supplier;
 
 /**
  * A mapping that resolves the number of buckets for each partition in a table.
@@ -47,6 +51,10 @@ import java.util.Map;
 public class PartitionBucketMapping implements Serializable {
 
     private static final long serialVersionUID = 1L;
+
+    private static final ConcurrentMap<CacheKey, PartitionBucketMapping> CACHE =
+            new ConcurrentHashMap<>();
+    private static final ConcurrentMap<CacheKey, Object> CACHE_LOCKS = new ConcurrentHashMap<>();
 
     /** The default number of buckets, used when a partition has no explicit mapping. */
     private final int defaultBucketCount;
@@ -72,7 +80,7 @@ public class PartitionBucketMapping implements Serializable {
     public PartitionBucketMapping(
             int defaultBucketCount, Map<BinaryRow, Integer> partitionBucketMap) {
         this.defaultBucketCount = defaultBucketCount;
-        this.partitionBucketMap = partitionBucketMap;
+        this.partitionBucketMap = Collections.unmodifiableMap(new HashMap<>(partitionBucketMap));
     }
 
     /**
@@ -89,6 +97,39 @@ public class PartitionBucketMapping implements Serializable {
      * @return a {@link PartitionBucketMapping} reflecting the current bucket layout of the table
      */
     public static PartitionBucketMapping loadFromTable(FileStoreTable table) {
+        if (!table.coreOptions().partitionBucketMappingCacheEnabled()) {
+            return loadFromTableWithoutCache(table);
+        }
+
+        CacheKey key = CacheKey.from(table);
+        return getOrLoad(key, () -> loadFromTableWithoutCache(table));
+    }
+
+    static PartitionBucketMapping getOrLoad(
+            CacheKey key, Supplier<PartitionBucketMapping> mappingLoader) {
+        PartitionBucketMapping cached = CACHE.get(key);
+        if (cached != null) {
+            return cached;
+        }
+
+        Object lock = CACHE_LOCKS.computeIfAbsent(key, ignored -> new Object());
+        synchronized (lock) {
+            try {
+                cached = CACHE.get(key);
+                if (cached != null) {
+                    return cached;
+                }
+
+                PartitionBucketMapping loaded = mappingLoader.get();
+                CACHE.put(key, loaded);
+                return loaded;
+            } finally {
+                CACHE_LOCKS.remove(key);
+            }
+        }
+    }
+
+    static PartitionBucketMapping loadFromTableWithoutCache(FileStoreTable table) {
         int defaultBuckets = table.schema().numBuckets();
         if (table.partitionKeys().isEmpty()) {
             return new PartitionBucketMapping(defaultBuckets, Collections.emptyMap());
@@ -96,6 +137,15 @@ public class PartitionBucketMapping implements Serializable {
 
         List<SimpleFileEntry> entries = table.store().newScan().readSimpleEntries();
         return loadFromEntries(entries, table.schema());
+    }
+
+    static void clearCache() {
+        CACHE.clear();
+        CACHE_LOCKS.clear();
+    }
+
+    static PartitionBucketMapping getCachedMapping(FileStoreTable table) {
+        return CACHE.get(CacheKey.from(table));
     }
 
     public static PartitionBucketMapping loadFromEntries(
@@ -136,5 +186,48 @@ public class PartitionBucketMapping implements Serializable {
             }
         }
         return defaultBucketCount;
+    }
+
+    static class CacheKey {
+        private final String tablePath;
+        private final long latestSnapshotId;
+        private final long schemaId;
+        private final int defaultBucketCount;
+
+        CacheKey(String tablePath, long latestSnapshotId, long schemaId, int defaultBucketCount) {
+            this.tablePath = tablePath;
+            this.latestSnapshotId = latestSnapshotId;
+            this.schemaId = schemaId;
+            this.defaultBucketCount = defaultBucketCount;
+        }
+
+        private static CacheKey from(FileStoreTable table) {
+            Long latestSnapshotId = table.snapshotManager().latestSnapshotId();
+            return new CacheKey(
+                    table.location().toString(),
+                    latestSnapshotId == null ? -1L : latestSnapshotId,
+                    table.schema().id(),
+                    table.schema().numBuckets());
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof CacheKey)) {
+                return false;
+            }
+            CacheKey cacheKey = (CacheKey) o;
+            return latestSnapshotId == cacheKey.latestSnapshotId
+                    && schemaId == cacheKey.schemaId
+                    && defaultBucketCount == cacheKey.defaultBucketCount
+                    && Objects.equals(tablePath, cacheKey.tablePath);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(tablePath, latestSnapshotId, schemaId, defaultBucketCount);
+        }
     }
 }
