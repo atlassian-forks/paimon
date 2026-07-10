@@ -19,6 +19,7 @@
 package org.apache.paimon.flink.sink;
 
 import org.apache.paimon.flink.FlinkConnectorOptions;
+import org.apache.paimon.flink.FlinkConnectorOptions.CompactionBucketDistributionStrategy;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 
@@ -28,6 +29,7 @@ import org.apache.flink.table.data.RowData;
 
 import java.util.Optional;
 
+import static org.apache.paimon.CoreOptions.createCommitUser;
 import static org.apache.paimon.flink.sink.FlinkStreamPartitioner.partition;
 
 /** Builder for {@link CompactorSink}. */
@@ -39,6 +41,9 @@ public class CompactorSinkBuilder {
 
     private final boolean fullCompaction;
 
+    private CompactionBucketDistributionStrategy bucketDistributionStrategy =
+            CompactionBucketDistributionStrategy.LINEAR;
+
     public CompactorSinkBuilder(FileStoreTable table, boolean fullCompaction) {
         this.table = table;
         this.fullCompaction = fullCompaction;
@@ -46,6 +51,12 @@ public class CompactorSinkBuilder {
 
     public CompactorSinkBuilder withInput(DataStream<RowData> input) {
         this.input = input;
+        return this;
+    }
+
+    public CompactorSinkBuilder withBucketDistributionStrategy(
+            CompactionBucketDistributionStrategy bucketDistributionStrategy) {
+        this.bucketDistributionStrategy = bucketDistributionStrategy;
         return this;
     }
 
@@ -66,8 +77,17 @@ public class CompactorSinkBuilder {
                                 table.options().get(FlinkConnectorOptions.SINK_PARALLELISM.key()))
                         .map(Integer::valueOf)
                         .orElse(null);
-        DataStream<RowData> partitioned =
-                partition(input, new BucketsRowChannelComputer(), parallelism);
-        return new CompactorSink(table, fullCompaction).sinkFrom(partitioned);
+        switch (bucketDistributionStrategy) {
+            case SIZE_AWARE_BATCH:
+                CompactorSink sink = new CompactorSink(table, fullCompaction);
+                String commitUser = createCommitUser(table.coreOptions().toConfiguration());
+                return sink.doCommit(
+                        sink.doWrite(input, commitUser, null).startNewChain(), commitUser);
+            case LINEAR:
+            default:
+                DataStream<RowData> partitioned =
+                        partition(input, new BucketsRowChannelComputer(), parallelism);
+                return new CompactorSink(table, fullCompaction).sinkFrom(partitioned);
+        }
     }
 }
