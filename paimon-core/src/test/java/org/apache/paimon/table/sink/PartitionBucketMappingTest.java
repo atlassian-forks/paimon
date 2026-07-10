@@ -34,6 +34,11 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -174,6 +179,114 @@ public class PartitionBucketMappingTest {
                 PartitionBucketMapping.loadFromEntries(entries, partitionedSchema(32));
 
         assertThat(mapping.resolveNumBuckets(partA)).isEqualTo(2);
+    }
+
+    @Test
+    public void testGetOrLoadCachesMappingByKey() {
+        PartitionBucketMapping.clearCache();
+        PartitionBucketMapping.CacheKey key =
+                new PartitionBucketMapping.CacheKey("table", 1, 0, 32);
+        AtomicInteger loadCount = new AtomicInteger();
+
+        PartitionBucketMapping first =
+                PartitionBucketMapping.getOrLoad(
+                        key,
+                        128,
+                        () -> {
+                            loadCount.incrementAndGet();
+                            return new PartitionBucketMapping(32);
+                        });
+        PartitionBucketMapping second =
+                PartitionBucketMapping.getOrLoad(
+                        key,
+                        128,
+                        () -> {
+                            loadCount.incrementAndGet();
+                            return new PartitionBucketMapping(64);
+                        });
+
+        assertThat(second).isSameAs(first);
+        assertThat(second.resolveNumBuckets(partition(1))).isEqualTo(32);
+        assertThat(loadCount).hasValue(1);
+        PartitionBucketMapping.clearCache();
+    }
+
+    @Test
+    public void testGetOrLoadInvalidatesOlderSnapshotsForSameTable() {
+        PartitionBucketMapping.clearCache();
+        PartitionBucketMapping.CacheKey oldSnapshot =
+                new PartitionBucketMapping.CacheKey("table", 1, 0, 32);
+        PartitionBucketMapping.CacheKey newSnapshot =
+                new PartitionBucketMapping.CacheKey("table", 2, 0, 32);
+
+        PartitionBucketMapping oldMapping =
+                PartitionBucketMapping.getOrLoad(
+                        oldSnapshot, 128, () -> new PartitionBucketMapping(32));
+        PartitionBucketMapping newMapping =
+                PartitionBucketMapping.getOrLoad(
+                        newSnapshot, 128, () -> new PartitionBucketMapping(64));
+
+        assertThat(newMapping).isNotSameAs(oldMapping);
+        assertThat(PartitionBucketMapping.getCachedMapping(oldSnapshot)).isNull();
+        assertThat(PartitionBucketMapping.getCachedMapping(newSnapshot)).isSameAs(newMapping);
+        PartitionBucketMapping.clearCache();
+    }
+
+    @Test
+    public void testGetOrLoadSingleFlightForConcurrentWriters() throws Exception {
+        PartitionBucketMapping.clearCache();
+        PartitionBucketMapping.CacheKey key =
+                new PartitionBucketMapping.CacheKey("table", 1, 0, 32);
+        AtomicInteger loadCount = new AtomicInteger();
+        CountDownLatch loaderStarted = new CountDownLatch(1);
+        CountDownLatch releaseLoader = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<PartitionBucketMapping> first =
+                    executor.submit(
+                            () ->
+                                    PartitionBucketMapping.getOrLoad(
+                                            key,
+                                            128,
+                                            () -> {
+                                                loadCount.incrementAndGet();
+                                                loaderStarted.countDown();
+                                                await(releaseLoader);
+                                                return new PartitionBucketMapping(32);
+                                            }));
+
+            loaderStarted.await();
+
+            Future<PartitionBucketMapping> second =
+                    executor.submit(
+                            () ->
+                                    PartitionBucketMapping.getOrLoad(
+                                            key,
+                                            128,
+                                            () -> {
+                                                loadCount.incrementAndGet();
+                                                return new PartitionBucketMapping(64);
+                                            }));
+
+            releaseLoader.countDown();
+
+            PartitionBucketMapping firstMapping = first.get();
+            PartitionBucketMapping secondMapping = second.get();
+            assertThat(secondMapping).isSameAs(firstMapping);
+            assertThat(loadCount).hasValue(1);
+        } finally {
+            executor.shutdownNow();
+            PartitionBucketMapping.clearCache();
+        }
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException(e);
+        }
     }
 
     private static BinaryRow partition(int value) {

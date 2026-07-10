@@ -24,11 +24,16 @@ import org.apache.paimon.manifest.SimpleFileEntry;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.FileStoreTable;
 
+import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Cache;
+import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Caffeine;
+
 import java.io.Serializable;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.function.Supplier;
 
 /**
  * A mapping that resolves the number of buckets for each partition in a table.
@@ -47,6 +52,9 @@ import java.util.Map;
 public class PartitionBucketMapping implements Serializable {
 
     private static final long serialVersionUID = 1L;
+
+    private static final Cache<CacheKey, PartitionBucketMapping> CACHE =
+            Caffeine.newBuilder().maximumSize(128).executor(Runnable::run).build();
 
     /** The default number of buckets, used when a partition has no explicit mapping. */
     private final int defaultBucketCount;
@@ -72,7 +80,7 @@ public class PartitionBucketMapping implements Serializable {
     public PartitionBucketMapping(
             int defaultBucketCount, Map<BinaryRow, Integer> partitionBucketMap) {
         this.defaultBucketCount = defaultBucketCount;
-        this.partitionBucketMap = partitionBucketMap;
+        this.partitionBucketMap = Collections.unmodifiableMap(new HashMap<>(partitionBucketMap));
     }
 
     /**
@@ -89,6 +97,42 @@ public class PartitionBucketMapping implements Serializable {
      * @return a {@link PartitionBucketMapping} reflecting the current bucket layout of the table
      */
     public static PartitionBucketMapping loadFromTable(FileStoreTable table) {
+        if (!table.coreOptions().partitionBucketMappingCacheEnabled()) {
+            return loadFromTableWithoutCache(table);
+        }
+
+        CacheKey key = CacheKey.from(table);
+        return getOrLoad(
+                key,
+                table.coreOptions().partitionBucketMappingCacheMaxEntries(),
+                () -> loadFromTableWithoutCache(table));
+    }
+
+    static PartitionBucketMapping getOrLoad(
+            CacheKey key, int maxEntries, Supplier<PartitionBucketMapping> mappingLoader) {
+        ensureMaximumSize(maxEntries);
+        return CACHE.get(
+                key,
+                ignored -> {
+                    invalidateOlderSnapshots(key);
+                    return mappingLoader.get();
+                });
+    }
+
+    private static void ensureMaximumSize(int maxEntries) {
+        CACHE.policy().eviction().ifPresent(eviction -> eviction.setMaximum(maxEntries));
+    }
+
+    private static void invalidateOlderSnapshots(CacheKey key) {
+        CACHE.asMap().keySet().stream()
+                .filter(
+                        existingKey ->
+                                existingKey.isSameTable(key)
+                                        && existingKey.latestSnapshotId < key.latestSnapshotId)
+                .forEach(CACHE::invalidate);
+    }
+
+    static PartitionBucketMapping loadFromTableWithoutCache(FileStoreTable table) {
         int defaultBuckets = table.schema().numBuckets();
         if (table.partitionKeys().isEmpty()) {
             return new PartitionBucketMapping(defaultBuckets, Collections.emptyMap());
@@ -96,6 +140,18 @@ public class PartitionBucketMapping implements Serializable {
 
         List<SimpleFileEntry> entries = table.store().newScan().readSimpleEntries();
         return loadFromEntries(entries, table.schema());
+    }
+
+    static void clearCache() {
+        CACHE.invalidateAll();
+    }
+
+    static PartitionBucketMapping getCachedMapping(FileStoreTable table) {
+        return CACHE.getIfPresent(CacheKey.from(table));
+    }
+
+    static PartitionBucketMapping getCachedMapping(CacheKey key) {
+        return CACHE.getIfPresent(key);
     }
 
     public static PartitionBucketMapping loadFromEntries(
@@ -136,5 +192,54 @@ public class PartitionBucketMapping implements Serializable {
             }
         }
         return defaultBucketCount;
+    }
+
+    static class CacheKey {
+        private final String tablePath;
+        private final long latestSnapshotId;
+        private final long schemaId;
+        private final int defaultBucketCount;
+
+        CacheKey(String tablePath, long latestSnapshotId, long schemaId, int defaultBucketCount) {
+            this.tablePath = tablePath;
+            this.latestSnapshotId = latestSnapshotId;
+            this.schemaId = schemaId;
+            this.defaultBucketCount = defaultBucketCount;
+        }
+
+        private static CacheKey from(FileStoreTable table) {
+            Long latestSnapshotId = table.snapshotManager().latestSnapshotId();
+            return new CacheKey(
+                    table.location().toString(),
+                    latestSnapshotId == null ? -1L : latestSnapshotId,
+                    table.schema().id(),
+                    table.schema().numBuckets());
+        }
+
+        private boolean isSameTable(CacheKey other) {
+            return schemaId == other.schemaId
+                    && defaultBucketCount == other.defaultBucketCount
+                    && Objects.equals(tablePath, other.tablePath);
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof CacheKey)) {
+                return false;
+            }
+            CacheKey cacheKey = (CacheKey) o;
+            return latestSnapshotId == cacheKey.latestSnapshotId
+                    && schemaId == cacheKey.schemaId
+                    && defaultBucketCount == cacheKey.defaultBucketCount
+                    && Objects.equals(tablePath, cacheKey.tablePath);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(tablePath, latestSnapshotId, schemaId, defaultBucketCount);
+        }
     }
 }
