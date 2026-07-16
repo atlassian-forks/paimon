@@ -33,6 +33,18 @@ under the License.
             <td>Maximum number of threads to copy bytes from small changelog files. By default is the number of processors available to the Java virtual machine.</td>
         </tr>
         <tr>
+            <td><h5>compaction.bucket-distribution-strategy</h5></td>
+            <td style="word-wrap: break-word;">linear</td>
+            <td><p>Enum</p></td>
+            <td>Defines how dedicated bucket compaction jobs distribute compact buckets to writers. 'linear' uses the existing stable partition-plus-bucket mapping. 'size-aware-batch' assigns bounded full-compaction bucket splits by total data file size and forwards them to writers to reduce compaction long tail.<br /><br />Possible values:<ul><li>"linear": Keep the existing linear bucket distribution.</li><li>"size-aware-batch": Assign bounded full-compaction bucket splits by total data file size. This mode is only supported for batch full compaction with fair split assignment.</li></ul></td>
+        </tr>
+        <tr>
+            <td><h5>compaction.size-aware.max-writers-per-partition</h5></td>
+            <td style="word-wrap: break-word;">-1</td>
+            <td>Integer</td>
+            <td>For 'size-aware-batch' compaction, limits the number of writers that can receive bucket groups from the same partition. A non-positive value means no limit. This can reduce S3 prefix request bursts by avoiding spreading one partition's buckets across too many writers.</td>
+        </tr>
+        <tr>
             <td><h5>commit.custom-listeners</h5></td>
             <td style="word-wrap: break-word;">(none)</td>
             <td>String</td>

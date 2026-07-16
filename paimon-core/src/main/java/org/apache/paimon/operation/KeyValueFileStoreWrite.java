@@ -113,6 +113,7 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
     private final RowType valueType;
     private final RowType partitionType;
     private final String commitUser;
+    @Nullable private final Integer writeId;
     @Nullable private final RecordLevelExpire recordLevelExpire;
     @Nullable private Cache<String, LookupFile> lookupFileCache;
 
@@ -136,7 +137,8 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
             @Nullable BucketedDvMaintainer.Factory dvMaintainerFactory,
             CoreOptions options,
             KeyValueFieldsExtractor extractor,
-            String tableName) {
+            String tableName,
+            @Nullable Integer writeId) {
         super(
                 snapshotManager,
                 scan,
@@ -150,6 +152,7 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
         this.keyType = keyType;
         this.valueType = valueType;
         this.commitUser = commitUser;
+        this.writeId = writeId;
 
         this.udsComparatorSupplier = udsComparatorSupplier;
         this.readerFactoryBuilder =
@@ -313,7 +316,7 @@ public class KeyValueFileStoreWrite extends MemoryFileStoreWrite<KeyValue> {
                             options.needLookup(),
                             recordLevelExpire,
                             options.forceRewriteAllFiles());
-            compactManager.setPartitionBucketInfo(partition, bucket, pathFactory);
+            compactManager.setPartitionBucketInfo(partition, bucket, pathFactory, writeId);
             return compactManager;
         }
     }

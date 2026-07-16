@@ -53,6 +53,8 @@ public class StaticFileStoreSource extends FlinkSource {
     private final SerializableFunction<FileStoreSourceSplit, Long> splitWeightFunc;
 
     @Nullable private final SerializableFunction<FileStoreSourceSplit, ?> splitGroupFunc;
+    @Nullable private final SerializableFunction<FileStoreSourceSplit, ?> splitSpreadGroupFunc;
+    private final int maxSpreadReadersPerGroup;
 
     public StaticFileStoreSource(
             ReadBuilder readBuilder,
@@ -124,12 +126,38 @@ public class StaticFileStoreSource extends FlinkSource {
             @Nullable NestedProjectedRowData rowData,
             SerializableFunction<FileStoreSourceSplit, Long> splitWeightFunc,
             @Nullable SerializableFunction<FileStoreSourceSplit, ?> splitGroupFunc) {
+        this(
+                readBuilder,
+                limit,
+                splitBatchSize,
+                splitAssignMode,
+                dynamicPartitionFilteringInfo,
+                rowData,
+                splitWeightFunc,
+                splitGroupFunc,
+                null,
+                -1);
+    }
+
+    public StaticFileStoreSource(
+            ReadBuilder readBuilder,
+            @Nullable Long limit,
+            int splitBatchSize,
+            SplitAssignMode splitAssignMode,
+            @Nullable DynamicPartitionFilteringInfo dynamicPartitionFilteringInfo,
+            @Nullable NestedProjectedRowData rowData,
+            SerializableFunction<FileStoreSourceSplit, Long> splitWeightFunc,
+            @Nullable SerializableFunction<FileStoreSourceSplit, ?> splitGroupFunc,
+            @Nullable SerializableFunction<FileStoreSourceSplit, ?> splitSpreadGroupFunc,
+            int maxSpreadReadersPerGroup) {
         super(readBuilder, limit, rowData);
         this.splitBatchSize = splitBatchSize;
         this.splitAssignMode = splitAssignMode;
         this.dynamicPartitionFilteringInfo = dynamicPartitionFilteringInfo;
         this.splitWeightFunc = splitWeightFunc;
         this.splitGroupFunc = splitGroupFunc;
+        this.splitSpreadGroupFunc = splitSpreadGroupFunc;
+        this.maxSpreadReadersPerGroup = maxSpreadReadersPerGroup;
     }
 
     @Override
@@ -150,7 +178,9 @@ public class StaticFileStoreSource extends FlinkSource {
                         splitAssignMode,
                         splits,
                         splitWeightFunc,
-                        splitGroupFunc);
+                        splitGroupFunc,
+                        splitSpreadGroupFunc,
+                        maxSpreadReadersPerGroup);
         return new StaticFileStoreSplitEnumerator(
                 context, null, splitAssigner, dynamicPartitionFilteringInfo);
     }
@@ -196,10 +226,36 @@ public class StaticFileStoreSource extends FlinkSource {
             Collection<FileStoreSourceSplit> splits,
             SerializableFunction<FileStoreSourceSplit, Long> splitWeightFunc,
             @Nullable SerializableFunction<FileStoreSourceSplit, ?> splitGroupFunc) {
+        return createSplitAssigner(
+                context,
+                splitBatchSize,
+                splitAssignMode,
+                splits,
+                splitWeightFunc,
+                splitGroupFunc,
+                null,
+                -1);
+    }
+
+    public static SplitAssigner createSplitAssigner(
+            SplitEnumeratorContext<FileStoreSourceSplit> context,
+            int splitBatchSize,
+            SplitAssignMode splitAssignMode,
+            Collection<FileStoreSourceSplit> splits,
+            SerializableFunction<FileStoreSourceSplit, Long> splitWeightFunc,
+            @Nullable SerializableFunction<FileStoreSourceSplit, ?> splitGroupFunc,
+            @Nullable SerializableFunction<FileStoreSourceSplit, ?> splitSpreadGroupFunc,
+            int maxSpreadReadersPerGroup) {
         switch (splitAssignMode) {
             case FAIR:
                 return new PreAssignSplitAssigner(
-                        splitBatchSize, context, splits, splitWeightFunc, splitGroupFunc);
+                        splitBatchSize,
+                        context,
+                        splits,
+                        splitWeightFunc,
+                        splitGroupFunc,
+                        splitSpreadGroupFunc,
+                        maxSpreadReadersPerGroup);
             case PREEMPTIVE:
                 return new FIFOSplitAssigner(splits);
             default:

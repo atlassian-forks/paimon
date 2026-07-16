@@ -122,7 +122,11 @@ public class CompactorSourceBuilder {
                             null,
                             null,
                             split -> bucketFileSize((DataSplit) split.split()),
-                            split -> bucketKey((DataSplit) split.split()))
+                            split -> bucketKey((DataSplit) split.split()),
+                            split -> partitionKey((DataSplit) split.split()),
+                            options.get(
+                                    FlinkConnectorOptions
+                                            .COMPACTION_SIZE_AWARE_MAX_WRITERS_PER_PARTITION))
                     : new StaticFileStoreSource(
                             readBuilder,
                             null,
@@ -189,6 +193,10 @@ public class CompactorSourceBuilder {
 
     static BucketKey bucketKey(DataSplit split) {
         return new BucketKey(split.partition().copy(), split.bucket());
+    }
+
+    static BinaryRow partitionKey(DataSplit split) {
+        return split.partition().copy();
     }
 
     static class BucketKey {

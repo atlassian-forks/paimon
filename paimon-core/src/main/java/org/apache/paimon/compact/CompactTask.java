@@ -39,24 +39,28 @@ public abstract class CompactTask implements Callable<CompactResult> {
 
     @Nullable private String partitionString;
     private int bucket = -1;
+    @Nullable private Integer subtaskId;
 
     public CompactTask(@Nullable CompactionMetrics.Reporter metricsReporter) {
         this.metricsReporter = metricsReporter;
     }
 
     /** Set partition and bucket info for logging purposes. */
-    public void setPartitionBucketInfo(@Nullable String partitionString, int bucket) {
+    public void setPartitionBucketInfo(
+            @Nullable String partitionString, int bucket, @Nullable Integer subtaskId) {
         this.partitionString = partitionString;
         this.bucket = bucket;
+        this.subtaskId = subtaskId;
     }
 
     @Override
     public CompactResult call() throws Exception {
         MetricUtils.safeCall(this::startTimer, LOG);
         LOG.info(
-                "Paimon compact task started: partition={}, bucket={}, taskType={}",
+                "Paimon compact task started: partition={}, bucket={}, subtaskId={}, taskType={}",
                 partitionString,
                 bucket,
+                subtaskId,
                 getClass().getSimpleName());
         try {
             long startMillis = System.currentTimeMillis();
@@ -83,10 +87,12 @@ public abstract class CompactTask implements Callable<CompactResult> {
                     LOG);
 
             LOG.info(
-                    "Paimon compact task finished: partition={}, bucket={}, taskType={}, "
-                            + "inputFiles={}, inputBytes={}, outputFiles={}, outputBytes={}, durationMs={}",
+                    "Paimon compact task finished: partition={}, bucket={}, subtaskId={}, "
+                            + "taskType={}, inputFiles={}, inputBytes={}, outputFiles={}, "
+                            + "outputBytes={}, durationMs={}",
                     partitionString,
                     bucket,
+                    subtaskId,
                     getClass().getSimpleName(),
                     result.before().size(),
                     result.before().stream().mapToLong(DataFileMeta::fileSize).sum(),
@@ -100,9 +106,10 @@ public abstract class CompactTask implements Callable<CompactResult> {
             return result;
         } catch (Exception e) {
             LOG.warn(
-                    "Paimon compact task failed: partition={}, bucket={}, taskType={}",
+                    "Paimon compact task failed: partition={}, bucket={}, subtaskId={}, taskType={}",
                     partitionString,
                     bucket,
+                    subtaskId,
                     getClass().getSimpleName(),
                     e);
             throw e;
