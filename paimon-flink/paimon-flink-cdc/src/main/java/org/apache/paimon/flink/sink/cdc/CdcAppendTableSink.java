@@ -26,6 +26,7 @@ import org.apache.paimon.manifest.ManifestCommittable;
 import org.apache.paimon.table.FileStoreTable;
 
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperatorFactory;
 
 import javax.annotation.Nullable;
@@ -50,7 +51,7 @@ public class CdcAppendTableSink extends FlinkWriteSink<CdcRecord> {
     }
 
     @Override
-    public DataStream<Committable> doWrite(
+    public SingleOutputStreamOperator<Committable> doWrite(
             DataStream<CdcRecord> input, String initialCommitUser, @Nullable Integer parallelism) {
         return super.doWrite(input, initialCommitUser, this.parallelism);
     }
