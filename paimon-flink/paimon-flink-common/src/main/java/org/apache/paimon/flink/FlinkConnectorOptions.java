@@ -127,6 +127,14 @@ public class FlinkConnectorOptions {
                                     "Defines how dedicated bucket compaction jobs distribute compact buckets to writers. "
                                             + "'linear' uses the existing stable partition-plus-bucket mapping. "
                                             + "'size-aware-batch' assigns bounded full-compaction bucket splits by total data file size and forwards them to writers to reduce compaction long tail.");
+
+    public static final ConfigOption<Integer> COMPACTION_SIZE_AWARE_MAX_WRITERS_PER_PARTITION =
+            ConfigOptions.key("compaction.size-aware.max-writers-per-partition")
+                    .intType()
+                    .defaultValue(-1)
+                    .withDescription(
+                            "For 'size-aware-batch' compaction, limits the number of writers that can receive bucket groups from the same partition. "
+                                    + "A non-positive value means no limit. This can reduce S3 prefix request bursts by avoiding spreading one partition's buckets across too many writers.");
     public static final ConfigOption<Boolean> INFER_SCAN_PARALLELISM =
             ConfigOptions.key("scan.infer-parallelism")
                     .booleanType()

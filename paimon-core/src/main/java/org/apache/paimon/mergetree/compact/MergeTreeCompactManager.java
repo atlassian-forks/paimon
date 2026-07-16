@@ -74,6 +74,7 @@ public class MergeTreeCompactManager extends CompactFutureManager {
 
     @Nullable private String partitionString;
     private int partitionBucket = -1;
+    @Nullable private Integer subtaskId;
 
     public MergeTreeCompactManager(
             ExecutorService executor,
@@ -110,13 +111,17 @@ public class MergeTreeCompactManager extends CompactFutureManager {
      * Set partition and bucket info so compact tasks can log readable partition/bucket identifiers.
      */
     public void setPartitionBucketInfo(
-            BinaryRow partition, int bucket, FileStorePathFactory pathFactory) {
+            BinaryRow partition,
+            int bucket,
+            FileStorePathFactory pathFactory,
+            @Nullable Integer subtaskId) {
         try {
             this.partitionString = pathFactory.getPartitionString(partition);
         } catch (Exception e) {
             this.partitionString = partition.toString();
         }
         this.partitionBucket = bucket;
+        this.subtaskId = subtaskId;
     }
 
     @Override
@@ -255,7 +260,7 @@ public class MergeTreeCompactManager extends CompactFutureManager {
                                                     file.fileName(), file.level(), file.fileSize()))
                             .collect(Collectors.joining(", ")));
         }
-        task.setPartitionBucketInfo(partitionString, partitionBucket);
+        task.setPartitionBucketInfo(partitionString, partitionBucket, subtaskId);
         taskFuture = executor.submit(task);
         if (metricsReporter != null) {
             metricsReporter.increaseCompactionsQueuedCount();

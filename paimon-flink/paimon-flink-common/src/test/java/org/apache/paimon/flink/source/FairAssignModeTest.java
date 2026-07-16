@@ -25,8 +25,10 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.apache.flink.connector.testutils.source.reader.TestingSplitEnumeratorContext.SplitAssignmentState;
 import static org.apache.paimon.flink.FlinkConnectorOptions.SplitAssignMode;
@@ -151,6 +153,39 @@ public class FairAssignModeTest extends StaticFileStoreSplitEnumeratorTestBase {
     }
 
     @Test
+    public void testGroupedSplitAllocationLimitsSpreadPerPartition() {
+        List<FileStoreSourceSplit> splits = new ArrayList<>();
+        for (int partition = 0; partition < 2; partition++) {
+            for (int bucket = 0; bucket < 4; bucket++) {
+                splits.add(
+                        createSnapshotSplit(
+                                partition * 10 + bucket,
+                                bucket,
+                                Collections.emptyList(),
+                                partition));
+            }
+        }
+
+        Map<Integer, SplitAssignmentState<FileStoreSourceSplit>> unlimitedAssignments =
+                assignGroupedSplitsWithMaxReadersPerPartition(splits, -1);
+        assertThat(unlimitedAssignments).containsOnlyKeys(0, 1, 2, 3);
+        assertThat(readersForPartition(unlimitedAssignments, 0)).hasSize(4);
+        assertThat(readersForPartition(unlimitedAssignments, 1)).hasSize(4);
+
+        Map<Integer, SplitAssignmentState<FileStoreSourceSplit>> limitedAssignments =
+                assignGroupedSplitsWithMaxReadersPerPartition(splits, 2);
+        assertThat(limitedAssignments).containsOnlyKeys(0, 1, 2, 3);
+        assertThat(readersForPartition(limitedAssignments, 0)).hasSize(2);
+
+        Set<Integer> partitionOneReaders = readersForPartition(limitedAssignments, 1);
+        assertThat(partitionOneReaders).hasSize(2);
+        assertThat(bucketsForPartition(limitedAssignments, partitionOneReaders, 1))
+                .containsExactlyInAnyOrder(0, 1, 2, 3);
+        assertThat(bucketsForPartition(limitedAssignments, readersWithout(partitionOneReaders), 1))
+                .isEmpty();
+    }
+
+    @Test
     public void testSplitBatch() {
         final TestingSplitEnumeratorContext<FileStoreSourceSplit> context =
                 getSplitEnumeratorContext(2);
@@ -246,6 +281,75 @@ public class FairAssignModeTest extends StaticFileStoreSplitEnumeratorTestBase {
         return splits.stream()
                 .mapToLong(split -> ((DataSplit) split.split()).bucket() == 0 ? 50L : 100L)
                 .sum();
+    }
+
+    private Map<Integer, SplitAssignmentState<FileStoreSourceSplit>>
+            assignGroupedSplitsWithMaxReadersPerPartition(
+                    List<FileStoreSourceSplit> splits, int maxReadersPerPartition) {
+        final TestingSplitEnumeratorContext<FileStoreSourceSplit> context =
+                getSplitEnumeratorContext(4);
+        StaticFileStoreSplitEnumerator enumerator =
+                new StaticFileStoreSplitEnumerator(
+                        context,
+                        null,
+                        StaticFileStoreSource.createSplitAssigner(
+                                context,
+                                10,
+                                SplitAssignMode.FAIR,
+                                splits,
+                                split -> 1L,
+                                split -> ((DataSplit) split.split()).bucket(),
+                                split -> ((DataSplit) split.split()).partition(),
+                                maxReadersPerPartition));
+
+        for (int reader = 0; reader < 4; reader++) {
+            enumerator.handleSplitRequest(reader, "test-host");
+        }
+        return context.getSplitAssignments();
+    }
+
+    private Set<Integer> bucketsForPartition(
+            Map<Integer, SplitAssignmentState<FileStoreSourceSplit>> assignments,
+            Set<Integer> readers,
+            int partition) {
+        Set<Integer> buckets = new HashSet<>();
+        for (Integer reader : readers) {
+            SplitAssignmentState<FileStoreSourceSplit> assignment = assignments.get(reader);
+            if (assignment == null) {
+                continue;
+            }
+            for (FileStoreSourceSplit split : assignment.getAssignedSplits()) {
+                DataSplit dataSplit = (DataSplit) split.split();
+                if (dataSplit.partition().getInt(0) == partition) {
+                    buckets.add(dataSplit.bucket());
+                }
+            }
+        }
+        return buckets;
+    }
+
+    private Set<Integer> readersWithout(Set<Integer> readers) {
+        Set<Integer> remainingReaders = new HashSet<>();
+        for (int reader = 0; reader < 4; reader++) {
+            if (!readers.contains(reader)) {
+                remainingReaders.add(reader);
+            }
+        }
+        return remainingReaders;
+    }
+
+    private Set<Integer> readersForPartition(
+            Map<Integer, SplitAssignmentState<FileStoreSourceSplit>> assignments, int partition) {
+        Set<Integer> readers = new HashSet<>();
+        for (Map.Entry<Integer, SplitAssignmentState<FileStoreSourceSplit>> assignment :
+                assignments.entrySet()) {
+            for (FileStoreSourceSplit split : assignment.getValue().getAssignedSplits()) {
+                if (((DataSplit) split.split()).partition().getInt(0) == partition) {
+                    readers.add(assignment.getKey());
+                }
+            }
+        }
+        return readers;
     }
 
     @Override
