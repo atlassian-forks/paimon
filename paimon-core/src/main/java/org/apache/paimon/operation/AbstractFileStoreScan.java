@@ -263,27 +263,17 @@ public abstract class AbstractFileStoreScan implements FileStoreScan {
     @Override
     public Plan plan() {
         long started = System.nanoTime();
-        long startManifests = System.currentTimeMillis();
         ManifestsReader.Result manifestsResult = readManifests();
-        long manifestsDuration = System.currentTimeMillis() - startManifests;
-        LOG.info(
-                "Read manifests, duration: {}ms, count: {}",
-                manifestsDuration,
-                manifestsResult.filteredManifests.size());
 
         Snapshot snapshot = manifestsResult.snapshot;
         List<ManifestFileMeta> manifests = manifestsResult.filteredManifests;
 
-        long startIterator = System.currentTimeMillis();
         Iterator<ManifestEntry> iterator = readManifestEntries(manifests, false);
-        long iteratorDuration = System.currentTimeMillis() - startIterator;
-        LOG.info("Obtained iterator for manifest entries, duration: {}ms", iteratorDuration);
 
         List<ManifestEntry> files = new ArrayList<>();
         while (iterator.hasNext()) {
             long startIteration = System.currentTimeMillis();
             ManifestEntry entry = iterator.next();
-            long iterationDuration = System.currentTimeMillis() - startIteration;
             // this step is pretty fast - entries are become available in "chunks"
             // i.e. once a manifest is read in full, and returned by readManifest, the individual
             // entries are processed and made available to the iterator in one batch
@@ -405,28 +395,16 @@ public abstract class AbstractFileStoreScan implements FileStoreScan {
             List<ManifestFileMeta> manifests,
             Function<List<ManifestEntry>, List<T>> converter,
             boolean useSequential) {
-        long startDeletedEntriesTime = System.currentTimeMillis();
         Set<Identifier> deletedEntries =
                 FileEntry.readDeletedEntries(
                         manifest -> readManifest(manifest, FileEntry.deletedFilter(), null),
                         manifests,
                         parallelism);
-        long deletedEntriesDuration = System.currentTimeMillis() - startDeletedEntriesTime;
-        LOG.info(
-                "Read deleted entries: {}, duration: {}ms",
-                deletedEntries.size(),
-                deletedEntriesDuration);
 
-        long startFilterTime = System.currentTimeMillis();
         manifests =
                 manifests.stream()
                         .filter(file -> file.numAddedFiles() > 0)
                         .collect(Collectors.toList());
-        long filterDuration = System.currentTimeMillis() - startFilterTime;
-        LOG.info(
-                "Filtered manifests: {} remaining manifests, duration: {}ms",
-                manifests.size(),
-                filterDuration);
 
         Function<ManifestFileMeta, List<T>> processor =
                 manifest ->
@@ -436,10 +414,8 @@ public abstract class AbstractFileStoreScan implements FileStoreScan {
                                         FileEntry.addFilter(),
                                         entry -> !deletedEntries.contains(entry.identifier())));
         if (useSequential) {
-            LOG.info("Using sequential execution for file entry processing");
             return sequentialBatchedExecute(processor, manifests, parallelism).iterator();
         } else {
-            LOG.info("Using random execution for file entry processing");
             return randomlyExecuteSequentialReturn(processor, manifests, parallelism);
         }
     }
