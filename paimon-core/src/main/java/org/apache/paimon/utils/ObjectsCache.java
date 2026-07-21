@@ -74,10 +74,8 @@ public abstract class ObjectsCache<K, V, S extends Segments> {
             if (cacheMetrics != null) {
                 cacheMetrics.increaseHitObject();
             }
-            LOG.info("ObjectsCache cache-hit for {}", key.toString());
             return readFromSegments(segments, filters);
         } else {
-            LOG.info("ObjectsCache cache-miss for {}", key.toString());
             if (cacheMetrics != null) {
                 cacheMetrics.increaseMissedObject();
             }
