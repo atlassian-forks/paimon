@@ -494,7 +494,6 @@ public abstract class AbstractFileStoreScan implements FileStoreScan {
             @Nullable Filter<InternalRow> additionalFilter,
             @Nullable Filter<ManifestEntry> additionalTFilter) {
         long startTime = System.currentTimeMillis();
-        LOG.info("Reading manifest file: {}", manifest.fileName());
         List<ManifestEntry> entries =
                 manifestFileFactory
                         .create()
@@ -513,7 +512,7 @@ public abstract class AbstractFileStoreScan implements FileStoreScan {
                                                 && filterByStats(entry));
         // SLOW PART IS HERE!!!
         long duration = System.currentTimeMillis() - startTime;
-        LOG.info(
+        LOG.debug(
                 "Successfully read manifest file: {}, entries: {}, duration: {}ms",
                 manifest.fileName(),
                 entries.size(),
@@ -525,7 +524,7 @@ public abstract class AbstractFileStoreScan implements FileStoreScan {
             }
             entries = copied;
             long duration2 = System.currentTimeMillis() - startTime;
-            LOG.info(
+            LOG.debug(
                     "Successfully pruned manifest file due to dropStats: {}, entries: {}, duration: {}ms",
                     manifest.fileName(),
                     entries.size(),

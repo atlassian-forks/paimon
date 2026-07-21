@@ -113,7 +113,6 @@ public class ManifestFile extends ObjectsFile<ManifestEntry> {
         try {
             Path path = pathFactory.toPath(fileName);
             if (cache != null) {
-                LOG.info("Reading manifest file from cache: {}", fileName);
                 return cache.read(
                         path,
                         fileSize,
@@ -121,7 +120,6 @@ public class ManifestFile extends ObjectsFile<ManifestEntry> {
                                 partitionFilter, bucketFilter, readFilter, readTFilter));
             }
 
-            LOG.info("Reading manifest file without cache: {}", fileName);
             return readFromIterator(
                     createIterator(path, fileSize), serializer, readFilter, readTFilter);
         } catch (IOException e) {
