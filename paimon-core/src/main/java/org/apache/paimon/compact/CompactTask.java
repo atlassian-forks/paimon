@@ -82,6 +82,12 @@ public abstract class CompactTask implements Callable<CompactResult> {
                                             .map(DataFileMeta::fileSize)
                                             .reduce(Long::sum)
                                             .orElse(0L));
+                            metricsReporter.reportCompactionInputFileCount(result.before().size());
+                            metricsReporter.reportCompactionOutputFileCount(result.after().size());
+                            metricsReporter.increaseCompactionInputFileCount(
+                                    result.before().size());
+                            metricsReporter.increaseCompactionOutputFileCount(
+                                    result.after().size());
                         }
                     },
                     LOG);
