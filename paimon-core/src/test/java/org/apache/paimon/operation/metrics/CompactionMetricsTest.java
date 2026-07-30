@@ -110,6 +110,9 @@ public class CompactionMetricsTest {
         assertThat(getMetric(metrics, CompactionMetrics.COMPACTION_COMPLETED_COUNT)).isEqualTo(0L);
         assertThat(getMetric(metrics, CompactionMetrics.COMPACTION_TOTAL_COUNT)).isEqualTo(0L);
         assertThat(getMetric(metrics, CompactionMetrics.COMPACTION_QUEUED_COUNT)).isEqualTo(0L);
+        assertThat(getMetric(metrics, CompactionMetrics.COMPACTION_INPUT_FILE_COUNT)).isEqualTo(0L);
+        assertThat(getMetric(metrics, CompactionMetrics.COMPACTION_OUTPUT_FILE_COUNT))
+                .isEqualTo(0L);
         CompactionMetrics.Reporter[] reporters = new CompactionMetrics.Reporter[3];
         for (int i = 0; i < reporters.length; i++) {
             reporters[i] = metrics.createReporter(BinaryRow.EMPTY_ROW, i);
@@ -131,6 +134,39 @@ public class CompactionMetricsTest {
         reporters[0].reportLevel0FileCount(8);
         assertThat(getMetric(metrics, CompactionMetrics.MAX_LEVEL0_FILE_COUNT)).isEqualTo(8L);
         assertThat(getMetric(metrics, CompactionMetrics.AVG_LEVEL0_FILE_COUNT)).isEqualTo(5.0);
+
+        assertThat(getMetric(metrics, CompactionMetrics.MAX_COMPACTION_INPUT_FILE_COUNT))
+                .isEqualTo(0L);
+        assertThat(getMetric(metrics, CompactionMetrics.AVG_COMPACTION_INPUT_FILE_COUNT))
+                .isEqualTo(0.0);
+        assertThat(getMetric(metrics, CompactionMetrics.MAX_COMPACTION_OUTPUT_FILE_COUNT))
+                .isEqualTo(0L);
+        assertThat(getMetric(metrics, CompactionMetrics.AVG_COMPACTION_OUTPUT_FILE_COUNT))
+                .isEqualTo(0.0);
+        reporters[0].reportCompactionInputFileCount(10);
+        reporters[1].reportCompactionInputFileCount(20);
+        reporters[2].reportCompactionInputFileCount(30);
+        reporters[0].reportCompactionOutputFileCount(1);
+        reporters[1].reportCompactionOutputFileCount(2);
+        reporters[2].reportCompactionOutputFileCount(3);
+        assertThat(getMetric(metrics, CompactionMetrics.MAX_COMPACTION_INPUT_FILE_COUNT))
+                .isEqualTo(30L);
+        assertThat(getMetric(metrics, CompactionMetrics.AVG_COMPACTION_INPUT_FILE_COUNT))
+                .isEqualTo(20.0);
+        assertThat(getMetric(metrics, CompactionMetrics.MAX_COMPACTION_OUTPUT_FILE_COUNT))
+                .isEqualTo(3L);
+        assertThat(getMetric(metrics, CompactionMetrics.AVG_COMPACTION_OUTPUT_FILE_COUNT))
+                .isEqualTo(2.0);
+        reporters[0].increaseCompactionInputFileCount(10);
+        reporters[1].increaseCompactionInputFileCount(20);
+        reporters[2].increaseCompactionInputFileCount(30);
+        reporters[0].increaseCompactionOutputFileCount(1);
+        reporters[1].increaseCompactionOutputFileCount(2);
+        reporters[2].increaseCompactionOutputFileCount(3);
+        assertThat(getMetric(metrics, CompactionMetrics.COMPACTION_INPUT_FILE_COUNT))
+                .isEqualTo(60L);
+        assertThat(getMetric(metrics, CompactionMetrics.COMPACTION_OUTPUT_FILE_COUNT))
+                .isEqualTo(6L);
 
         reporters[0].reportCompactionTime(300000);
         reporters[0].reportCompactionTime(250000);
