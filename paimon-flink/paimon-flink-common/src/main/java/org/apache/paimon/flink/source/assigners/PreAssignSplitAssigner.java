@@ -28,6 +28,8 @@ import org.apache.paimon.utils.SerializableFunction;
 
 import org.apache.flink.api.connector.source.SplitEnumeratorContext;
 import org.apache.flink.table.connector.source.DynamicFilteringData;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
@@ -50,6 +52,8 @@ import static org.apache.paimon.flink.utils.TableScanUtils.getSnapshotId;
  * DynamicFilteringData, and then distribute the splits fairly.
  */
 public class PreAssignSplitAssigner implements SplitAssigner {
+
+    private static final Logger LOG = LoggerFactory.getLogger(PreAssignSplitAssigner.class);
 
     /** Default batch splits size to avoid exceed `akka.framesize`. */
     private final int splitBatchSize;
@@ -184,7 +188,40 @@ public class PreAssignSplitAssigner implements SplitAssigner {
                         groupFunc,
                         spreadGroupFunc,
                         maxReadersPerSpreadGroup);
+        logSplitAssignmentSummary(
+                this.pendingSplitAssignment, parallelism, splits.size(), weightFunc);
         this.numberOfPendingSplits = new AtomicInteger(splits.size());
+    }
+
+    private static void logSplitAssignmentSummary(
+            Map<Integer, LinkedList<FileStoreSourceSplit>> assignment,
+            int parallelism,
+            int totalSplits,
+            SerializableFunction<FileStoreSourceSplit, Long> weightFunc) {
+        if (!LOG.isInfoEnabled()) {
+            return;
+        }
+
+        long totalWeight = 0L;
+        List<Integer> splitCounts = new ArrayList<>(parallelism);
+        List<Long> assignedWeights = new ArrayList<>(parallelism);
+        for (int i = 0; i < parallelism; i++) {
+            Collection<FileStoreSourceSplit> splits =
+                    assignment.getOrDefault(i, new LinkedList<>());
+            long assignedWeight = splits.stream().mapToLong(weightFunc::apply).sum();
+            splitCounts.add(splits.size());
+            assignedWeights.add(assignedWeight);
+            totalWeight += assignedWeight;
+        }
+
+        LOG.info(
+                "Created FAIR split assignment summary: parallelism={}, totalSplits={}, "
+                        + "totalWeight={}, splitCountsPerSubtask={}, assignedWeightsPerSubtask={}",
+                parallelism,
+                totalSplits,
+                totalWeight,
+                splitCounts,
+                assignedWeights);
     }
 
     @Override
