@@ -71,9 +71,10 @@ public abstract class AppendTableSink<T> extends FlinkWriteSink<T> {
     }
 
     @Override
-    public DataStream<Committable> doWrite(
+    public SingleOutputStreamOperator<Committable> doWrite(
             DataStream<T> input, String initialCommitUser, @Nullable Integer parallelism) {
-        DataStream<Committable> written = super.doWrite(input, initialCommitUser, this.parallelism);
+        SingleOutputStreamOperator<Committable> written =
+                super.doWrite(input, initialCommitUser, this.parallelism);
 
         Options options = new Options(table.options());
         if (options.get(FlinkConnectorOptions.PRECOMMIT_COMPACT)) {

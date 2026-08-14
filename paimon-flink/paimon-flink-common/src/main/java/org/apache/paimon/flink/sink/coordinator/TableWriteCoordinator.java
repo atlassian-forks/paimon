@@ -32,6 +32,9 @@ import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Cache;
 import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Caffeine;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -54,11 +57,14 @@ import static org.apache.paimon.utils.SerializationUtils.deserializeBinaryRow;
  */
 public class TableWriteCoordinator {
 
+    private static final Logger LOG = LoggerFactory.getLogger(TableWriteCoordinator.class);
+
     private final FileStoreTable table;
     private final Map<String, Long> latestCommittedIdentifiers;
     private final FileStoreScan scan;
     private final IndexFileHandler indexFileHandler;
     private final int pageSize;
+    private final boolean prefetchManifests;
     private final Cache<CoordinationKey, byte[]> pagedCoordination;
 
     private volatile Snapshot snapshot;
@@ -78,6 +84,10 @@ public class TableWriteCoordinator {
                                 .toConfiguration()
                                 .get(FlinkConnectorOptions.SINK_WRITER_COORDINATOR_PAGE_SIZE)
                                 .getBytes();
+        this.prefetchManifests =
+                table.coreOptions()
+                        .toConfiguration()
+                        .get(FlinkConnectorOptions.SINK_WRITER_COORDINATOR_PREFETCH_MANIFESTS);
         this.pagedCoordination =
                 Caffeine.newBuilder()
                         .executor(Runnable::run)
@@ -93,6 +103,36 @@ public class TableWriteCoordinator {
         }
         this.snapshot = latestSnapshot.get();
         this.scan.withSnapshot(snapshot);
+        if (prefetchManifests) {
+            warmManifestCache();
+        }
+    }
+
+    /**
+     * Eagerly read all data manifests of the current snapshot once to warm the table's {@link
+     * org.apache.paimon.utils.SegmentsCache} (the byte-level manifest cache attached to the table
+     * inside the Job Manager). This reuses the same threaded {@code plan()} read path that per-task
+     * {@link #scan} requests use, so subsequent concurrent requests hit warm bytes instead of each
+     * performing a cold manifest read. A failure here must never break {@link #refresh()}, so any
+     * exception is swallowed and logged.
+     */
+    private void warmManifestCache() {
+        try {
+            long startTime = System.currentTimeMillis();
+            // Clear any leftover partition/bucket filter from a previous scan() so the whole
+            // snapshot is read; each scan() call re-applies its own withPartitionBucket afterward.
+            scan.withPartitionFilter((List<BinaryRow>) null).withBucket((Integer) null).plan();
+            LOG.info(
+                    "Warmed writer coordinator manifest cache for snapshot {}, duration: {}ms",
+                    snapshot.id(),
+                    System.currentTimeMillis() - startTime);
+        } catch (Exception e) {
+            LOG.warn(
+                    "Failed to warm writer coordinator manifest cache for snapshot {}. "
+                            + "Falling back to cold per-request manifest reads.",
+                    snapshot == null ? null : snapshot.id(),
+                    e);
+        }
     }
 
     public synchronized PagedCoordinationResponse scan(PagedCoordinationRequest request)
