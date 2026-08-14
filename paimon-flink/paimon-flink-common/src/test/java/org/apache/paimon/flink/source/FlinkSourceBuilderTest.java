@@ -22,16 +22,27 @@ import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.CatalogContext;
 import org.apache.paimon.catalog.CatalogFactory;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.flink.FlinkConnectorOptions;
+import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.table.Table;
+import org.apache.paimon.table.source.DataSplit;
+import org.apache.paimon.table.source.Split;
 import org.apache.paimon.types.DataTypes;
 
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -80,6 +91,86 @@ public class FlinkSourceBuilderTest {
         Identifier identifier = Identifier.create("default", tableName);
         catalog.createTable(identifier, schema, false);
         return catalog.getTable(identifier);
+    }
+
+    @Test
+    public void testSplitFileSizeOrRowCountUsesDataSplitFileSize() {
+        FileStoreSourceSplit split =
+                new FileStoreSourceSplit(
+                        "split-1",
+                        DataSplit.builder()
+                                .withSnapshot(1L)
+                                .withPartition(org.apache.paimon.data.BinaryRow.EMPTY_ROW)
+                                .withBucket(0)
+                                .withBucketPath("bucket-0")
+                                .withDataFiles(
+                                        Arrays.asList(
+                                                dataFile("file-1", 10L, 1L),
+                                                dataFile("file-2", 25L, 1000L)))
+                                .build());
+
+        assertThat(FlinkSourceBuilder.splitFileSizeOrRowCount(split)).isEqualTo(35L);
+    }
+
+    @Test
+    public void testSplitFileSizeOrRowCountFallsBackToRowCount() {
+        FileStoreSourceSplit split = new FileStoreSourceSplit("split-1", new TestSplit(123L));
+
+        assertThat(FlinkSourceBuilder.splitFileSizeOrRowCount(split)).isEqualTo(123L);
+    }
+
+    private static DataFileMeta dataFile(String fileName, long fileSize, long rowCount) {
+        return DataFileMeta.forAppend(
+                fileName,
+                fileSize,
+                rowCount,
+                null,
+                0L,
+                0L,
+                0L,
+                Collections.emptyList(),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null);
+    }
+
+    private static class TestSplit implements Split {
+
+        private final long rowCount;
+
+        private TestSplit(long rowCount) {
+            this.rowCount = rowCount;
+        }
+
+        @Override
+        public long rowCount() {
+            return rowCount;
+        }
+    }
+
+    @Test
+    public void testFileSizeWeightModeOnlyWorksWithFairAssignMode() throws Exception {
+        Table table = createTable("file_size_preemptive", false, 2, false);
+        Map<String, String> options = new HashMap<>();
+        options.put(
+                FlinkConnectorOptions.SCAN_SPLIT_ENUMERATOR_WEIGHT_MODE.key(),
+                FlinkConnectorOptions.SplitWeightMode.FILE_SIZE.toString());
+        options.put(
+                FlinkConnectorOptions.SCAN_SPLIT_ENUMERATOR_ASSIGN_MODE.key(),
+                FlinkConnectorOptions.SplitAssignMode.PREEMPTIVE.toString());
+        table = table.copy(options);
+
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        FlinkSourceBuilder builder = new FlinkSourceBuilder(table).env(env).sourceBounded(true);
+
+        assertThatThrownBy(builder::build)
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(FlinkConnectorOptions.SCAN_SPLIT_ENUMERATOR_WEIGHT_MODE.key())
+                .hasMessageContaining(
+                        FlinkConnectorOptions.SCAN_SPLIT_ENUMERATOR_ASSIGN_MODE.key());
     }
 
     @Test
