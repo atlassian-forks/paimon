@@ -66,12 +66,25 @@ public class ManifestsReader {
         this.manifestListFactory = manifestListFactory;
     }
 
+    public RowType partitionType() {
+        return partitionType;
+    }
+
     public ManifestsReader onlyReadRealBuckets() {
         this.onlyReadRealBuckets = true;
         return this;
     }
 
     public ManifestsReader withBucket(int bucket) {
+        this.specifiedBucket = bucket;
+        return this;
+    }
+
+    /**
+     * Set or clear the bucket filter. A {@code null} bucket clears any previously-set bucket
+     * filter.
+     */
+    public ManifestsReader withBucket(@Nullable Integer bucket) {
         this.specifiedBucket = bucket;
         return this;
     }
@@ -91,8 +104,11 @@ public class ManifestsReader {
         return this;
     }
 
-    public ManifestsReader withPartitionFilter(List<BinaryRow> partitions) {
-        this.partitionFilter = PartitionPredicate.fromMultiple(partitionType, partitions);
+    public ManifestsReader withPartitionFilter(@Nullable List<BinaryRow> partitions) {
+        this.partitionFilter =
+                partitions == null
+                        ? null
+                        : PartitionPredicate.fromMultiple(partitionType, partitions);
         return this;
     }
 

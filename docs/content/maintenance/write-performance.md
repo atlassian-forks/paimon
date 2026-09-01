@@ -130,6 +130,19 @@ here (For example, writing a large number of partitions simultaneously), you can
 to use a Flink coordinator to cache the read manifest data to accelerate initialization. The cache memory for coordinator
 is `sink.writer-coordinator.cache-memory`, default is 1GB in Job Manager.
 
+By default the coordinator manifest cache holds its entries with soft references, so the JVM may reclaim them under
+GC pressure. When a busy Job Manager is under sustained pressure this can produce a cache-thrash spiral: reclaimed
+entries are immediately refetched and decompressed, which transiently spikes heap (often several times the steady-state
+cache footprint) and triggers further reclamation. If you observe this, set `sink.writer-coordinator.cache-soft-values`
+to `false` so entries are held with strong references and the spiral cannot start. Idle entries are still released by
+the `sink.writer-coordinator.cache-expire-after-access` TTL (default 30 minutes).
+
+When soft references are disabled the cache deterministically occupies up to `sink.writer-coordinator.cache-memory`,
+so under-sizing the heap becomes a fast-fail `OutOfMemoryError` rather than silent degradation. Size the Job Manager
+`-Xmx` to at least roughly twice the configured cache memory, leaving headroom for the transient cold-fill overshoot
+and the Job Manager's own working set. The same soft-values toggle and headroom guidance apply to the catalog manifest
+cache via `cache.manifest.soft-values` and `cache.manifest.max-memory`.
+
 ## Write Memory
 
 There are three main places in Paimon writer that takes up memory:
