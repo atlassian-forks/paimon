@@ -199,7 +199,8 @@ public class KeyValueFileStore extends AbstractFileStore<KeyValue> {
                 dvMaintainerFactory,
                 options,
                 keyValueFieldsExtractor,
-                tableName);
+                tableName,
+                writeId);
     }
 
     @Override

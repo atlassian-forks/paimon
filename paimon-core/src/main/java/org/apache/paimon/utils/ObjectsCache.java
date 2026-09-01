@@ -24,6 +24,9 @@ import org.apache.paimon.data.serializer.InternalRowSerializer;
 import org.apache.paimon.operation.metrics.CacheMetrics;
 import org.apache.paimon.types.RowType;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
@@ -35,6 +38,8 @@ import static org.apache.paimon.utils.ObjectsFile.readFromIterator;
 /** Cache records to {@link SegmentsCache} by compacted serializer. */
 @ThreadSafe
 public abstract class ObjectsCache<K, V, S extends Segments> {
+
+    private static final Logger LOG = LoggerFactory.getLogger(ObjectsCache.class);
 
     protected final SegmentsCache<K> cache;
     protected final ObjectSerializer<V> projectedSerializer;
