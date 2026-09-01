@@ -590,6 +590,28 @@ public class FlinkConnectorOptions {
                                     + "Distinct from 'sink.writer-coordinator.cache-page-size', which "
                                     + "controls the manifest cache memory layout, not RPC chunking.");
 
+    public static final ConfigOption<String> SINK_WRITER_COORDINATOR_PAGED_CACHE_MEMORY =
+            key("sink.writer-coordinator.paged-cache-memory")
+                    .stringType()
+                    .defaultValue("-1")
+                    .withDescription(
+                            "Maximum total bytes retained by the writer coordinator for paged RPC "
+                                    + "responses. The limit is applied independently from the manifest "
+                                    + "cache memory limit. Use -1 (default) to preserve the legacy "
+                                    + "unweighted and unbounded cache. Otherwise use a memory size such "
+                                    + "as '256 mb'. Responses evicted while a writer is still paging are "
+                                    + "rebuilt against the snapshot captured for that request.");
+
+    public static final ConfigOption<Duration>
+            SINK_WRITER_COORDINATOR_PAGED_CACHE_EXPIRE_AFTER_ACCESS =
+                    key("sink.writer-coordinator.paged-cache-expire-after-access")
+                            .durationType()
+                            .defaultValue(Duration.ofMinutes(30))
+                            .withDescription(
+                                    "Idle TTL for paged writer coordinator RPC responses. Completed, "
+                                            + "failed, and reset requests are invalidated immediately; "
+                                            + "this TTL bounds abandoned requests.");
+
     public static final ConfigOption<Boolean> SINK_WRITER_COORDINATOR_PREFETCH_MANIFESTS =
             key("sink.writer-coordinator.prefetch-manifests")
                     .booleanType()
