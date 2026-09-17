@@ -33,6 +33,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
 /**
@@ -111,12 +112,23 @@ public class PartitionBucketMapping implements Serializable {
     static PartitionBucketMapping getOrLoad(
             CacheKey key, int maxEntries, Supplier<PartitionBucketMapping> mappingLoader) {
         ensureMaximumSize(maxEntries);
-        return CACHE.get(
-                key,
-                ignored -> {
-                    invalidateOlderSnapshots(key);
-                    return mappingLoader.get();
-                });
+        AtomicBoolean loaded = new AtomicBoolean(false);
+        PartitionBucketMapping mapping =
+                CACHE.get(
+                        key,
+                        ignored -> {
+                            loaded.set(true);
+                            return mappingLoader.get();
+                        });
+
+        // Do not invalidate entries from inside CACHE.get's mapping function. Caffeine executes
+        // the function while holding a ConcurrentHashMap bin lock, and invalidating another entry
+        // can acquire a second bin lock. Concurrent loads can then acquire those locks in opposite
+        // order and deadlock during writer initialization.
+        if (loaded.get()) {
+            invalidateOlderSnapshots(key);
+        }
+        return mapping;
     }
 
     private static void ensureMaximumSize(int maxEntries) {

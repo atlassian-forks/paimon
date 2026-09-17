@@ -224,7 +224,16 @@ public class PartitionBucketMappingTest {
                         oldSnapshot, 128, () -> new PartitionBucketMapping(32));
         PartitionBucketMapping newMapping =
                 PartitionBucketMapping.getOrLoad(
-                        newSnapshot, 128, () -> new PartitionBucketMapping(64));
+                        newSnapshot,
+                        128,
+                        () -> {
+                            // Older entries must not be invalidated from inside the cache loader.
+                            // Doing so while CACHE.get holds a ConcurrentHashMap bin lock can
+                            // deadlock with another concurrent table load.
+                            assertThat(PartitionBucketMapping.getCachedMapping(oldSnapshot))
+                                    .isSameAs(oldMapping);
+                            return new PartitionBucketMapping(64);
+                        });
 
         assertThat(newMapping).isNotSameAs(oldMapping);
         assertThat(PartitionBucketMapping.getCachedMapping(oldSnapshot)).isNull();
