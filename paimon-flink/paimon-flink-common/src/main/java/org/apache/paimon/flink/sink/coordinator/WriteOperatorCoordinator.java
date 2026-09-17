@@ -21,9 +21,11 @@ package org.apache.paimon.flink.sink.coordinator;
 import org.apache.paimon.flink.sink.TableWriteOperator;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.options.MemorySize;
+import org.apache.paimon.options.Options;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.utils.SegmentsCache;
 
+import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.operators.coordination.CoordinationRequest;
 import org.apache.flink.runtime.operators.coordination.CoordinationRequestHandler;
@@ -31,11 +33,17 @@ import org.apache.flink.runtime.operators.coordination.CoordinationResponse;
 import org.apache.flink.runtime.operators.coordination.OperatorCoordinator;
 import org.apache.flink.runtime.operators.coordination.OperatorEvent;
 
+import javax.annotation.Nullable;
+
+import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ThreadPoolExecutor;
 
+import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_WRITER_COORDINATOR_CACHE_EXPIRE_AFTER_ACCESS;
 import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_WRITER_COORDINATOR_CACHE_MEMORY;
+import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_WRITER_COORDINATOR_CACHE_PAGE_SIZE;
+import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_WRITER_COORDINATOR_CACHE_SOFT_VALUES;
 import static org.apache.paimon.utils.ThreadPoolUtils.createCachedThreadPool;
 
 /**
@@ -45,26 +53,61 @@ import static org.apache.paimon.utils.ThreadPoolUtils.createCachedThreadPool;
 public class WriteOperatorCoordinator implements OperatorCoordinator, CoordinationRequestHandler {
 
     private final FileStoreTable table;
+    @Nullable private final MetricGroup metricGroup;
 
     private ThreadPoolExecutor executor;
     private TableWriteCoordinator coordinator;
 
     public WriteOperatorCoordinator(FileStoreTable table) {
+        this(table, null);
+    }
+
+    WriteOperatorCoordinator(FileStoreTable table, @Nullable MetricGroup metricGroup) {
         this.table = table;
+        this.metricGroup = metricGroup;
     }
 
     @Override
     public void start() throws Exception {
         executor = createCachedThreadPool(1, "WriteCoordinator");
-        MemorySize cacheMemory =
-                table.coreOptions().toConfiguration().get(SINK_WRITER_COORDINATOR_CACHE_MEMORY);
-        SegmentsCache<Path> manifestCache = SegmentsCache.create(cacheMemory, Long.MAX_VALUE);
+        Options tableOptions = table.coreOptions().toConfiguration();
+        MemorySize cacheMemory = tableOptions.get(SINK_WRITER_COORDINATOR_CACHE_MEMORY);
+        int cachePageSize =
+                (int) tableOptions.get(SINK_WRITER_COORDINATOR_CACHE_PAGE_SIZE).getBytes();
+        Duration cacheExpireAfterAccess =
+                tableOptions.get(SINK_WRITER_COORDINATOR_CACHE_EXPIRE_AFTER_ACCESS);
+        boolean cacheSoftValues = tableOptions.get(SINK_WRITER_COORDINATOR_CACHE_SOFT_VALUES);
+        SegmentsCache<Path> manifestCache =
+                SegmentsCache.create(
+                        cachePageSize,
+                        cacheMemory,
+                        Long.MAX_VALUE,
+                        cacheExpireAfterAccess,
+                        cacheSoftValues);
         table.setManifestCache(manifestCache);
         coordinator = new TableWriteCoordinator(table);
+        if (metricGroup != null) {
+            metricGroup.gauge("manifestCacheBytes", manifestCache::totalCacheBytes);
+            metricGroup.gauge("manifestCacheEntries", manifestCache::estimatedSize);
+            metricGroup.gauge("pagedCoordinationCacheBytes", coordinator::pagedCoordinationBytes);
+            metricGroup.gauge(
+                    "pagedCoordinationCacheEntries", coordinator::pagedCoordinationEntries);
+            metricGroup.gauge(
+                    "lastSerializedScanResponseBytes",
+                    coordinator::lastSerializedScanResponseBytes);
+            metricGroup.gauge(
+                    "maxSerializedScanResponseBytes", coordinator::maxSerializedScanResponseBytes);
+            metricGroup.gauge(
+                    "pagedCoordinationRecomputations",
+                    coordinator::pagedCoordinationRecomputations);
+        }
     }
 
     @Override
     public void close() throws Exception {
+        if (coordinator != null) {
+            coordinator.clearPagedCoordination();
+        }
         if (executor != null) {
             executor.shutdownNow();
             executor = null;
@@ -92,6 +135,10 @@ public class WriteOperatorCoordinator implements OperatorCoordinator, Coordinati
                         }
                         future.complete(CoordinationResponseUtils.wrap(response));
                     } catch (Exception e) {
+                        if (request instanceof PagedCoordinationRequest) {
+                            coordinator.invalidatePagedCoordination(
+                                    (PagedCoordinationRequest) request);
+                        }
                         future.completeExceptionally(e);
                     }
                 });
@@ -118,16 +165,28 @@ public class WriteOperatorCoordinator implements OperatorCoordinator, Coordinati
     public void notifyCheckpointComplete(long checkpointId) {}
 
     @Override
-    public void resetToCheckpoint(long checkpointId, byte[] checkpointData) {}
+    public void resetToCheckpoint(long checkpointId, byte[] checkpointData) {
+        clearPagedCoordination();
+    }
 
     @Override
-    public void subtaskReset(int subtask, long checkpointId) {}
+    public void subtaskReset(int subtask, long checkpointId) {
+        clearPagedCoordination();
+    }
 
     @Override
-    public void executionAttemptFailed(int subtask, int attemptNumber, Throwable reason) {}
+    public void executionAttemptFailed(int subtask, int attemptNumber, Throwable reason) {
+        clearPagedCoordination();
+    }
 
     @Override
     public void executionAttemptReady(int subtask, int attemptNumber, SubtaskGateway gateway) {}
+
+    private void clearPagedCoordination() {
+        if (coordinator != null) {
+            coordinator.clearPagedCoordination();
+        }
+    }
 
     /** Provider for {@link WriteOperatorCoordinator}. */
     public static class Provider implements OperatorCoordinator.Provider {
@@ -147,7 +206,7 @@ public class WriteOperatorCoordinator implements OperatorCoordinator, Coordinati
 
         @Override
         public OperatorCoordinator create(Context context) {
-            return new WriteOperatorCoordinator(table);
+            return new WriteOperatorCoordinator(table, context.metricGroup());
         }
     }
 }

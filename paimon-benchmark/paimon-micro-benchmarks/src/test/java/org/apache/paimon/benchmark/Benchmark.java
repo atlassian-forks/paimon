@@ -114,7 +114,7 @@ public class Benchmark {
 
             if (outputPerIteration) {
                 System.out.println(
-                        "Iteration " + iter + " took " + runTime / 1000 + " microseconds");
+                        "Iteration " + iter + " took " + runTime / 1000000 + " microseconds");
             }
         }
         System.out.println(

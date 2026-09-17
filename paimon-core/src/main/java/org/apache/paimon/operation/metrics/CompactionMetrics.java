@@ -45,12 +45,23 @@ public class CompactionMetrics {
     public static final String COMPACTION_COMPLETED_COUNT = "compactionCompletedCount";
     public static final String COMPACTION_TOTAL_COUNT = "compactionTotalCount";
     public static final String COMPACTION_QUEUED_COUNT = "compactionQueuedCount";
+    public static final String COMPACTION_INPUT_FILE_COUNT = "compactionInputFileCount";
+    public static final String COMPACTION_OUTPUT_FILE_COUNT = "compactionOutputFileCount";
     public static final String MAX_COMPACTION_INPUT_SIZE = "maxCompactionInputSize";
     public static final String MAX_COMPACTION_OUTPUT_SIZE = "maxCompactionOutputSize";
     public static final String AVG_COMPACTION_INPUT_SIZE = "avgCompactionInputSize";
     public static final String AVG_COMPACTION_OUTPUT_SIZE = "avgCompactionOutputSize";
+    public static final String MAX_COMPACTION_INPUT_FILE_COUNT = "maxCompactionInputFileCount";
+    public static final String MAX_COMPACTION_OUTPUT_FILE_COUNT = "maxCompactionOutputFileCount";
+    public static final String AVG_COMPACTION_INPUT_FILE_COUNT = "avgCompactionInputFileCount";
+    public static final String AVG_COMPACTION_OUTPUT_FILE_COUNT = "avgCompactionOutputFileCount";
     public static final String MAX_TOTAL_FILE_SIZE = "maxTotalFileSize";
     public static final String AVG_TOTAL_FILE_SIZE = "avgTotalFileSize";
+
+    public static final String MAX_SORT_BUFFER_USED_BYTES = "maxSortBufferUsedBytes";
+    public static final String AVG_SORT_BUFFER_USED_BYTES = "avgSortBufferUsedBytes";
+    public static final String MAX_SORT_BUFFER_UTILISATION = "maxSortBufferUtilisationPercent";
+    public static final String AVG_SORT_BUFFER_UTILISATION = "avgSortBufferUtilisationPercent";
 
     private static final long BUSY_MEASURE_MILLIS = 60_000;
     private static final int COMPACTION_TIME_WINDOW = 100;
@@ -62,6 +73,8 @@ public class CompactionMetrics {
     private Counter compactionsCompletedCounter;
     private Counter compactionsTotalCounter;
     private Counter compactionsQueuedCounter;
+    private Counter compactionInputFileCounter;
+    private Counter compactionOutputFileCounter;
 
     public CompactionMetrics(MetricRegistry registry, String tableName) {
         this.metricGroup = registry.createTableMetricGroup(GROUP_NAME, tableName);
@@ -91,6 +104,18 @@ public class CompactionMetrics {
         metricGroup.gauge(
                 AVG_COMPACTION_OUTPUT_SIZE,
                 () -> getCompactionOutputSizeStream().average().orElse(-1));
+        metricGroup.gauge(
+                MAX_COMPACTION_INPUT_FILE_COUNT,
+                () -> getCompactionInputFileCountStream().max().orElse(-1));
+        metricGroup.gauge(
+                MAX_COMPACTION_OUTPUT_FILE_COUNT,
+                () -> getCompactionOutputFileCountStream().max().orElse(-1));
+        metricGroup.gauge(
+                AVG_COMPACTION_INPUT_FILE_COUNT,
+                () -> getCompactionInputFileCountStream().average().orElse(-1));
+        metricGroup.gauge(
+                AVG_COMPACTION_OUTPUT_FILE_COUNT,
+                () -> getCompactionOutputFileCountStream().average().orElse(-1));
 
         metricGroup.gauge(
                 AVG_COMPACTION_TIME, () -> getCompactionTimeStream().average().orElse(0.0));
@@ -99,9 +124,23 @@ public class CompactionMetrics {
         compactionsCompletedCounter = metricGroup.counter(COMPACTION_COMPLETED_COUNT);
         compactionsTotalCounter = metricGroup.counter(COMPACTION_TOTAL_COUNT);
         compactionsQueuedCounter = metricGroup.counter(COMPACTION_QUEUED_COUNT);
+        compactionInputFileCounter = metricGroup.counter(COMPACTION_INPUT_FILE_COUNT);
+        compactionOutputFileCounter = metricGroup.counter(COMPACTION_OUTPUT_FILE_COUNT);
 
         metricGroup.gauge(MAX_TOTAL_FILE_SIZE, () -> getTotalFileSizeStream().max().orElse(-1));
         metricGroup.gauge(AVG_TOTAL_FILE_SIZE, () -> getTotalFileSizeStream().average().orElse(-1));
+
+        metricGroup.gauge(
+                MAX_SORT_BUFFER_USED_BYTES, () -> getSortBufferUsedBytesStream().max().orElse(-1));
+        metricGroup.gauge(
+                AVG_SORT_BUFFER_USED_BYTES,
+                () -> getSortBufferUsedBytesStream().average().orElse(-1));
+        metricGroup.gauge(
+                MAX_SORT_BUFFER_UTILISATION,
+                () -> getSortBufferUtilisationStream().max().orElse(-1));
+        metricGroup.gauge(
+                AVG_SORT_BUFFER_UTILISATION,
+                () -> getSortBufferUtilisationStream().average().orElse(-1));
     }
 
     private LongStream getLevel0FileCountStream() {
@@ -116,6 +155,14 @@ public class CompactionMetrics {
         return reporters.values().stream().mapToLong(r -> r.compactionOutputSize);
     }
 
+    private LongStream getCompactionInputFileCountStream() {
+        return reporters.values().stream().mapToLong(r -> r.compactionInputFileCount);
+    }
+
+    private LongStream getCompactionOutputFileCountStream() {
+        return reporters.values().stream().mapToLong(r -> r.compactionOutputFileCount);
+    }
+
     private DoubleStream getCompactBusyStream() {
         return compactTimers.values().stream()
                 .mapToDouble(t -> 100.0 * t.calculateLength() / BUSY_MEASURE_MILLIS);
@@ -128,6 +175,14 @@ public class CompactionMetrics {
     @VisibleForTesting
     public LongStream getTotalFileSizeStream() {
         return reporters.values().stream().mapToLong(r -> r.totalFileSize);
+    }
+
+    private LongStream getSortBufferUsedBytesStream() {
+        return reporters.values().stream().mapToLong(r -> r.sortBufferUsedBytes);
+    }
+
+    private DoubleStream getSortBufferUtilisationStream() {
+        return reporters.values().stream().mapToDouble(r -> r.sortBufferUtilisationPercent);
     }
 
     public void close() {
@@ -151,11 +206,21 @@ public class CompactionMetrics {
 
         void decreaseCompactionsQueuedCount();
 
+        void increaseCompactionInputFileCount(long count);
+
+        void increaseCompactionOutputFileCount(long count);
+
         void reportCompactionInputSize(long bytes);
 
         void reportCompactionOutputSize(long bytes);
 
+        void reportCompactionInputFileCount(long count);
+
+        void reportCompactionOutputFileCount(long count);
+
         void reportTotalFileSize(long bytes);
+
+        void reportSortBufferMetrics(long usedBytes, long totalBytes);
 
         void unregister();
     }
@@ -166,7 +231,11 @@ public class CompactionMetrics {
         private long level0FileCount;
         private long compactionInputSize = 0;
         private long compactionOutputSize = 0;
+        private long compactionInputFileCount = 0;
+        private long compactionOutputFileCount = 0;
         private long totalFileSize = 0;
+        private long sortBufferUsedBytes = 0;
+        private double sortBufferUtilisationPercent = 0.0;
 
         private ReporterImpl(PartitionAndBucket key) {
             this.key = key;
@@ -201,6 +270,16 @@ public class CompactionMetrics {
         }
 
         @Override
+        public void reportCompactionInputFileCount(long count) {
+            this.compactionInputFileCount = count;
+        }
+
+        @Override
+        public void reportCompactionOutputFileCount(long count) {
+            this.compactionOutputFileCount = count;
+        }
+
+        @Override
         public void reportTotalFileSize(long bytes) {
             this.totalFileSize = bytes;
         }
@@ -208,6 +287,13 @@ public class CompactionMetrics {
         @Override
         public void reportLevel0FileCount(long count) {
             this.level0FileCount = count;
+        }
+
+        @Override
+        public void reportSortBufferMetrics(long usedBytes, long totalBytes) {
+            this.sortBufferUsedBytes = usedBytes;
+            this.sortBufferUtilisationPercent =
+                    totalBytes > 0 ? 100.0 * usedBytes / totalBytes : 0.0;
         }
 
         @Override
@@ -228,6 +314,16 @@ public class CompactionMetrics {
         @Override
         public void decreaseCompactionsQueuedCount() {
             compactionsQueuedCounter.dec();
+        }
+
+        @Override
+        public void increaseCompactionInputFileCount(long count) {
+            compactionInputFileCounter.inc(count);
+        }
+
+        @Override
+        public void increaseCompactionOutputFileCount(long count) {
+            compactionOutputFileCounter.inc(count);
         }
 
         @Override

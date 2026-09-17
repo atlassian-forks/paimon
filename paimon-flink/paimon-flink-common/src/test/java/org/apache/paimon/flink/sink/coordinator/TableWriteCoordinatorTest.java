@@ -21,16 +21,21 @@ package org.apache.paimon.flink.sink.coordinator;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.GenericRow;
+import org.apache.paimon.flink.FlinkConnectorOptions;
+import org.apache.paimon.fs.Path;
+import org.apache.paimon.options.MemorySize;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.TableTestBase;
 import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.utils.SegmentsCache;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.apache.paimon.data.BinaryRow.EMPTY_ROW;
+import static org.apache.paimon.utils.InstantiationUtil.serializeObject;
 import static org.apache.paimon.utils.SerializationUtils.serializeBinaryRow;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -67,6 +72,43 @@ class TableWriteCoordinatorTest extends TableTestBase {
     }
 
     @Test
+    public void testPrefetchManifestsWarmsCache() throws Exception {
+        Identifier identifier = new Identifier("db", "table");
+        Schema schema =
+                Schema.newBuilder()
+                        .column("f0", DataTypes.INT())
+                        .option(
+                                FlinkConnectorOptions.SINK_WRITER_COORDINATOR_PREFETCH_MANIFESTS
+                                        .key(),
+                                "true")
+                        .build();
+        catalog.createDatabase("db", false);
+        catalog.createTable(identifier, schema, false);
+        FileStoreTable table = getTable(identifier);
+
+        write(table, GenericRow.of(1));
+        write(table, GenericRow.of(2));
+
+        // Writing might already touch manifest files, so replace the table cache with a fresh one
+        // to make this test focus only on coordinator prefetch behavior.
+        table.setManifestCache(
+                new SegmentsCache<Path>(1024, MemorySize.ofMebiBytes(64), Long.MAX_VALUE));
+        assertThat(table.getManifestCache().totalCacheBytes()).isZero();
+
+        // Constructing the coordinator runs refresh() which warms the manifest cache when the
+        // prefetch option is enabled
+        TableWriteCoordinator coordinator = new TableWriteCoordinator(table);
+        assertThat(table.getManifestCache().totalCacheBytes()).isGreaterThan(0);
+
+        // scan results remain correct after warming
+        ScanCoordinationRequest request =
+                new ScanCoordinationRequest(serializeBinaryRow(EMPTY_ROW), 0, false, false);
+        ScanCoordinationResponse scan = coordinator.scan(request);
+        assertThat(scan.snapshot().id()).isEqualTo(table.latestSnapshot().get().id());
+        assertThat(scan.extractDataFiles().size()).isEqualTo(2);
+    }
+
+    @Test
     public void testNoManifestCache() throws Exception {
         Identifier identifier = new Identifier("db", "table");
         catalog.createDatabase("db", false);
@@ -75,5 +117,115 @@ class TableWriteCoordinatorTest extends TableTestBase {
         table.setManifestCache(null);
         assertThatThrownBy(() -> new TableWriteCoordinator(table))
                 .isInstanceOf(NullPointerException.class);
+    }
+
+    @Test
+    public void testPagedResponseCacheReleasedAfterCompletion() throws Exception {
+        TableWriteCoordinator coordinator = createPagedCoordinator("1 mb");
+        byte[] requestContent = serializeObject(scanRequest());
+        PagedCoordinationRequest request =
+                new PagedCoordinationRequest(requestContent, "request-1", null);
+
+        PagedCoordinationResponse response = coordinator.scan(request);
+        assertThat(response.nextPageToken()).isNotNull();
+        assertThat(coordinator.pagedCoordinationEntries()).isEqualTo(1);
+        assertThat(coordinator.pagedCoordinationBytes()).isGreaterThan(0);
+
+        while (response.nextPageToken() != null) {
+            response =
+                    coordinator.scan(
+                            new PagedCoordinationRequest(
+                                    requestContent, "request-1", response.nextPageToken()));
+        }
+
+        assertThat(coordinator.pagedCoordinationEntries()).isZero();
+        assertThat(coordinator.pagedCoordinationBytes()).isZero();
+        assertThat(coordinator.lastSerializedScanResponseBytes()).isGreaterThan(0);
+        assertThat(coordinator.maxSerializedScanResponseBytes())
+                .isEqualTo(coordinator.lastSerializedScanResponseBytes());
+    }
+
+    @Test
+    public void testPagedResponseCacheIsUnboundedByDefault() throws Exception {
+        TableWriteCoordinator coordinator = createPagedCoordinator(null);
+        byte[] requestContent = serializeObject(scanRequest());
+
+        PagedCoordinationResponse response =
+                coordinator.scan(
+                        new PagedCoordinationRequest(requestContent, "unbounded-request", null));
+
+        assertThat(response.nextPageToken()).isNotNull();
+        assertThat(coordinator.pagedCoordinationEntries()).isEqualTo(1);
+        assertThat(coordinator.pagedCoordinationBytes()).isGreaterThan(0);
+    }
+
+    @Test
+    public void testPagedResponseRebuiltWhenOverMemoryLimit() throws Exception {
+        TableWriteCoordinator coordinator = createPagedCoordinator("1 bytes");
+        byte[] requestContent = serializeObject(scanRequest());
+
+        PagedCoordinationResponse first =
+                coordinator.scan(new PagedCoordinationRequest(requestContent, "request-2", null));
+        assertThat(first.nextPageToken()).isNotNull();
+        assertThat(coordinator.pagedCoordinationEntries()).isZero();
+        assertThat(coordinator.pagedCoordinationBytes()).isZero();
+
+        PagedCoordinationResponse second =
+                coordinator.scan(
+                        new PagedCoordinationRequest(
+                                requestContent, "request-2", first.nextPageToken()));
+        assertThat(second.content()).isNotEmpty();
+        assertThat(coordinator.pagedCoordinationRecomputations()).isEqualTo(1);
+    }
+
+    @Test
+    public void testClearPagedResponseCacheInvalidatesRequest() throws Exception {
+        TableWriteCoordinator coordinator = createPagedCoordinator("1 mb");
+        byte[] requestContent = serializeObject(scanRequest());
+        PagedCoordinationResponse first =
+                coordinator.scan(new PagedCoordinationRequest(requestContent, "request-3", null));
+        assertThat(first.nextPageToken()).isNotNull();
+
+        coordinator.clearPagedCoordination();
+
+        assertThatThrownBy(
+                        () ->
+                                coordinator.scan(
+                                        new PagedCoordinationRequest(
+                                                requestContent,
+                                                "request-3",
+                                                first.nextPageToken())))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("expired before completion");
+    }
+
+    private TableWriteCoordinator createPagedCoordinator(String cacheMemory) throws Exception {
+        Identifier identifier =
+                new Identifier(
+                        "db",
+                        cacheMemory == null
+                                ? "paged_default"
+                                : "paged_" + cacheMemory.replace(' ', '_'));
+        Schema.Builder schemaBuilder =
+                Schema.newBuilder()
+                        .column("f0", DataTypes.INT())
+                        .option(
+                                FlinkConnectorOptions.SINK_WRITER_COORDINATOR_PAGE_SIZE.key(),
+                                "16 bytes");
+        if (cacheMemory != null) {
+            schemaBuilder.option(
+                    FlinkConnectorOptions.SINK_WRITER_COORDINATOR_PAGED_CACHE_MEMORY.key(),
+                    cacheMemory);
+        }
+        Schema schema = schemaBuilder.build();
+        catalog.createDatabase("db", true);
+        catalog.createTable(identifier, schema, false);
+        FileStoreTable table = getTable(identifier);
+        write(table, GenericRow.of(1));
+        return new TableWriteCoordinator(table);
+    }
+
+    private ScanCoordinationRequest scanRequest() {
+        return new ScanCoordinationRequest(serializeBinaryRow(EMPTY_ROW), 0, false, false);
     }
 }

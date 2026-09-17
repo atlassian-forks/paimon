@@ -111,7 +111,6 @@ public class RescaleAction extends TableActionBase {
                                         : scanParallelism)
                         .partitionPredicate(partitionPredicate)
                         .build();
-
         Map<String, String> bucketOptions = new HashMap<>(fileStoreTable.options());
         if (bucketNum == null) {
             Preconditions.checkArgument(
@@ -120,6 +119,7 @@ public class RescaleAction extends TableActionBase {
         } else {
             bucketOptions.put(CoreOptions.BUCKET.key(), String.valueOf(bucketNum));
         }
+
         FileStoreTable rescaledTable =
                 fileStoreTable.copy(fileStoreTable.schema().copy(bucketOptions));
         new FlinkSinkBuilder(rescaledTable)

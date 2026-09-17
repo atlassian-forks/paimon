@@ -49,13 +49,27 @@ public interface FileStoreScan {
 
     FileStoreScan withPartitionFilter(Predicate predicate);
 
-    FileStoreScan withPartitionFilter(List<BinaryRow> partitions);
+    /**
+     * Set or clear the partition filter to a specific list of partitions. A {@code null} list
+     * clears any previously-set partition filter, so that subsequent {@link #plan()} invocations
+     * are not restricted to specific partitions. Useful when reusing a single {@link FileStoreScan}
+     * instance across multiple queries with differing scopes.
+     */
+    FileStoreScan withPartitionFilter(@Nullable List<BinaryRow> partitions);
 
     FileStoreScan withPartitionsFilter(List<Map<String, String>> partitions);
 
     FileStoreScan withPartitionFilter(PartitionPredicate predicate);
 
     FileStoreScan withBucket(int bucket);
+
+    /**
+     * Set or clear the bucket filter. A {@code null} bucket clears any previously-set bucket
+     * filter, so that subsequent {@link #plan()} invocations are not restricted to a specific
+     * bucket. Useful when reusing a single {@link FileStoreScan} instance across multiple queries
+     * with differing scopes.
+     */
+    FileStoreScan withBucket(@Nullable Integer bucket);
 
     FileStoreScan onlyReadRealBuckets();
 
