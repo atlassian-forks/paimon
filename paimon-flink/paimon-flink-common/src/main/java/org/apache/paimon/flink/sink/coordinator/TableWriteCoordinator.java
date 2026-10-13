@@ -30,6 +30,7 @@ import org.apache.paimon.operation.WriteRestore;
 import org.apache.paimon.options.MemorySize;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.sink.PartitionBucketMapping;
 
 import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Cache;
 import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Caffeine;
@@ -78,6 +79,9 @@ public class TableWriteCoordinator {
     private volatile long maxSerializedScanResponseBytes;
 
     private volatile Snapshot snapshot;
+
+    private long bucketMappingSnapshotId = -1;
+    private PartitionBucketMapping bucketMapping;
 
     public TableWriteCoordinator(FileStoreTable table) {
         this.table = table;
@@ -259,6 +263,22 @@ public class TableWriteCoordinator {
         List<ManifestEntry> entries =
                 requestScan.withPartitionBucket(partition, bucket).plan().files();
         Integer totalBuckets = WriteRestore.extractDataFiles(entries, restoreFiles);
+        if (totalBuckets == null && table.schema().numBuckets() > 0) {
+            // Empty buckets have no file metadata. Recover the partition layout from the
+            // request snapshot, including when an evicted paged response is recomputed.
+            // Load lazily so disabling manifest prefetch still avoids a startup scan.
+            if (bucketMapping == null || bucketMappingSnapshotId != requestSnapshot.id()) {
+                bucketMapping =
+                        PartitionBucketMapping.loadFromEntries(
+                                table.store()
+                                        .newScan()
+                                        .withSnapshot(requestSnapshot)
+                                        .readSimpleEntries(),
+                                table.schema());
+                bucketMappingSnapshotId = requestSnapshot.id();
+            }
+            totalBuckets = bucketMapping.resolveNumBuckets(partition);
+        }
 
         IndexFileMeta dynamicBucketIndex = null;
         if (request.scanDynamicBucketIndex()) {
