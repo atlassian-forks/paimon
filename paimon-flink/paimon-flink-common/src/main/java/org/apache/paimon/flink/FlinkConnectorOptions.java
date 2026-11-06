@@ -590,6 +590,34 @@ public class FlinkConnectorOptions {
                                     + "Distinct from 'sink.writer-coordinator.cache-page-size', which "
                                     + "controls the manifest cache memory layout, not RPC chunking.");
 
+    public static final ConfigOption<Boolean> SINK_WRITER_COORDINATOR_SPILL_ENABLED =
+            key("sink.writer-coordinator.spill-enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "If true, spill serialized writer coordinator scan responses to local "
+                                    + "disk on both the JobManager and TaskManagers. This avoids "
+                                    + "retaining the complete outer serialized response in heap while "
+                                    + "preserving the existing paged RPC wire format.");
+
+    public static final ConfigOption<String> SINK_WRITER_COORDINATOR_SPILL_DIRECTORY =
+            key("sink.writer-coordinator.spill-directory")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Absolute local directory used by the JobManager and TaskManagers for writer "
+                                    + "coordinator spill files. The directory is created if needed. "
+                                    + "If unset, the JVM temporary directory is used.");
+
+    public static final ConfigOption<MemorySize> SINK_WRITER_COORDINATOR_SPILL_BUFFER_SIZE =
+            key("sink.writer-coordinator.spill-buffer-size")
+                    .memoryType()
+                    .defaultValue(MemorySize.ofKibiBytes(64))
+                    .withDescription(
+                            "Buffer size used for writer coordinator spill file input and output. "
+                                    + "This is independent from 'sink.writer-coordinator.page-size', "
+                                    + "which controls the size of each RPC response page.");
+
     public static final ConfigOption<String> SINK_WRITER_COORDINATOR_PAGED_CACHE_MEMORY =
             key("sink.writer-coordinator.paged-cache-memory")
                     .stringType()
