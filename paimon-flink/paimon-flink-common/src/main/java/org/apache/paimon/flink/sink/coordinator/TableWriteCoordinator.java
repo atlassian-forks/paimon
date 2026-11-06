@@ -34,11 +34,15 @@ import org.apache.paimon.table.sink.PartitionBucketMapping;
 
 import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Cache;
 import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Caffeine;
+import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.RemovalCause;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
+
 import java.io.IOException;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -51,7 +55,6 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.apache.paimon.deletionvectors.DeletionVectorsIndexFile.DELETION_VECTORS_INDEX;
 import static org.apache.paimon.utils.InstantiationUtil.deserializeObject;
-import static org.apache.paimon.utils.InstantiationUtil.serializeObject;
 import static org.apache.paimon.utils.Preconditions.checkNotNull;
 import static org.apache.paimon.utils.SerializationUtils.deserializeBinaryRow;
 
@@ -70,7 +73,10 @@ public class TableWriteCoordinator {
     private final IndexFileHandler indexFileHandler;
     private final int pageSize;
     private final boolean prefetchManifests;
-    private final Cache<CoordinationKey, byte[]> pagedCoordination;
+    private final boolean spillEnabled;
+    private final int spillBufferSize;
+    @Nullable private final Path spillDirectory;
+    private final Cache<CoordinationKey, SerializedScanResponse> pagedCoordination;
     private final Cache<CoordinationKey, Snapshot> pagedCoordinationSnapshots;
     private final long pagedCoordinationMaxBytes;
     private final AtomicLong pagedCoordinationRecomputations = new AtomicLong();
@@ -99,6 +105,12 @@ public class TableWriteCoordinator {
                                 .getBytes();
         this.prefetchManifests =
                 options.get(FlinkConnectorOptions.SINK_WRITER_COORDINATOR_PREFETCH_MANIFESTS);
+        this.spillEnabled =
+                options.get(FlinkConnectorOptions.SINK_WRITER_COORDINATOR_SPILL_ENABLED);
+        this.spillBufferSize =
+                spillEnabled ? WriterCoordinatorSpillFile.configuredBufferSize(options) : 0;
+        this.spillDirectory =
+                spillEnabled ? WriterCoordinatorSpillFile.configuredDirectory(options) : null;
         String pagedCacheMemory =
                 options.get(FlinkConnectorOptions.SINK_WRITER_COORDINATOR_PAGED_CACHE_MEMORY);
         Duration pagedCacheTtl =
@@ -111,6 +123,7 @@ public class TableWriteCoordinator {
                     Caffeine.newBuilder()
                             .executor(Runnable::run)
                             .weigher(TableWriteCoordinator::pagedResponseWeight)
+                            .removalListener(TableWriteCoordinator::closePagedResponse)
                             .maximumWeight(pagedCoordinationMaxBytes)
                             .expireAfterAccess(pagedCacheTtl)
                             .build();
@@ -118,6 +131,7 @@ public class TableWriteCoordinator {
             this.pagedCoordination =
                     Caffeine.newBuilder()
                             .executor(Runnable::run)
+                            .removalListener(TableWriteCoordinator::closePagedResponse)
                             .expireAfterAccess(pagedCacheTtl)
                             .build();
         }
@@ -173,7 +187,8 @@ public class TableWriteCoordinator {
             throws IOException {
         Integer pageToken = request.pageToken();
         CoordinationKey requestKey = new CoordinationKey(request.content(), request.requestId());
-        byte[] full;
+        SerializedScanResponse full;
+        boolean newlySerialized = false;
         if (pageToken != null) {
             full = pagedCoordination.getIfPresent(requestKey);
             if (full == null) {
@@ -186,12 +201,50 @@ public class TableWriteCoordinator {
                 }
                 pagedCoordinationRecomputations.incrementAndGet();
                 full = serializeScanResponse(request.content(), requestSnapshot);
-                cachePagedResponse(requestKey, full);
+                newlySerialized = true;
             }
         } else {
             Snapshot requestSnapshot = snapshot;
             full = serializeScanResponse(request.content(), requestSnapshot);
-            if (full.length > pageSize && requestSnapshot != null) {
+            newlySerialized = true;
+        }
+
+        int offset = pageToken == null ? 0 : pageToken;
+        if (offset < 0 || offset >= full.length()) {
+            if (newlySerialized) {
+                full.close();
+            }
+            invalidatePagedCoordination(request);
+            throw new IllegalArgumentException(
+                    "Invalid writer coordinator page token "
+                            + offset
+                            + " for response of "
+                            + full.length()
+                            + " bytes.");
+        }
+        byte[] content;
+        try {
+            content = full.readPage(offset, pageSize);
+        } catch (IOException | RuntimeException e) {
+            if (newlySerialized) {
+                full.close();
+            }
+            throw e;
+        }
+        int len = content.length;
+        Integer nextPageToken = offset + len;
+        if (nextPageToken >= full.length()) {
+            nextPageToken = null;
+            invalidatePagedCoordination(request);
+            if (newlySerialized) {
+                full.close();
+            }
+        } else if (newlySerialized) {
+            Snapshot requestSnapshot =
+                    pageToken == null
+                            ? snapshot
+                            : pagedCoordinationSnapshots.getIfPresent(requestKey);
+            if (requestSnapshot != null) {
                 pagedCoordinationSnapshots.put(requestKey, requestSnapshot);
                 cachePagedResponse(requestKey, full);
                 if (pagedCoordinationMaxBytes >= 0
@@ -200,45 +253,72 @@ public class TableWriteCoordinator {
                             "Writer coordinator response ({} bytes) exceeds or was evicted from "
                                     + "the paged response cache ({} bytes). Later pages will be "
                                     + "rebuilt against snapshot {}.",
-                            full.length,
+                            full.length(),
                             pagedCoordinationMaxBytes,
                             requestSnapshot.id());
                 }
+            } else {
+                full.close();
             }
-        }
-
-        int offset = pageToken == null ? 0 : pageToken;
-        if (offset < 0 || offset >= full.length) {
-            invalidatePagedCoordination(request);
-            throw new IllegalArgumentException(
-                    "Invalid writer coordinator page token "
-                            + offset
-                            + " for response of "
-                            + full.length
-                            + " bytes.");
-        }
-        int len = Math.min(full.length - offset, pageSize);
-        byte[] content = Arrays.copyOfRange(full, offset, offset + len);
-        Integer nextPageToken = offset + len;
-        if (nextPageToken >= full.length) {
-            nextPageToken = null;
-            invalidatePagedCoordination(request);
         }
         return new PagedCoordinationResponse(content, nextPageToken);
     }
 
-    private byte[] serializeScanResponse(byte[] requestContent, Snapshot requestSnapshot)
-            throws IOException {
+    private SerializedScanResponse serializeScanResponse(
+            byte[] requestContent, Snapshot requestSnapshot) throws IOException {
         ScanCoordinationRequest coordination;
         try {
             coordination = deserializeObject(requestContent, getClass().getClassLoader());
         } catch (ClassNotFoundException e) {
             throw new RuntimeException(e);
         }
-        byte[] full = serializeObject(scan(coordination, requestSnapshot));
-        lastSerializedScanResponseBytes = full.length;
-        maxSerializedScanResponseBytes = Math.max(maxSerializedScanResponseBytes, full.length);
+        ScanCoordinationResponse response = scan(coordination, requestSnapshot);
+        SerializedScanResponse full =
+                spillEnabled
+                        ? SerializedScanResponse.spilled(response, spillBufferSize, spillDirectory)
+                        : SerializedScanResponse.inMemory(response);
+        lastSerializedScanResponseBytes = full.length();
+        maxSerializedScanResponseBytes = Math.max(maxSerializedScanResponseBytes, full.length());
+        logScanResponseSize(coordination, response, full.length());
         return full;
+    }
+
+    private void logScanResponseSize(
+            ScanCoordinationRequest request,
+            ScanCoordinationResponse response,
+            long serializedResponseBytes) {
+        int dataFileCount = response.dataFileCount();
+        long serializedDataFilesBytes = response.serializedDataFilesBytes();
+        long averageSerializedDataFileBytes =
+                dataFileCount == 0 ? 0 : serializedDataFilesBytes / dataFileCount;
+        long outerSerializationBytes =
+                Math.max(
+                        0,
+                        serializedResponseBytes
+                                - serializedDataFilesBytes
+                                - response.serializedIndexBytes());
+        LOG.info(
+                "Writer coordinator scan response size: table={}, snapshotId={}, "
+                        + "partitionHash={}, partitionBytes={}, bucket={}, matchedFileCount={}, "
+                        + "serializedDataFilesBytes={}, "
+                        + "averageSerializedDataFileBytes={}, rawStatsPayloadBytes={}, "
+                        + "rawKeyBoundsPayloadBytes={}, embeddedIndexPayloadBytes={}, "
+                        + "serializedIndexBytes={}, outerSerializationBytes={}, "
+                        + "serializedResponseBytes={}",
+                table.name(),
+                response.snapshot() == null ? null : response.snapshot().id(),
+                Arrays.hashCode(request.partition()),
+                request.partition().length,
+                request.bucket(),
+                dataFileCount,
+                serializedDataFilesBytes,
+                averageSerializedDataFileBytes,
+                response.rawStatsPayloadBytes(),
+                response.rawKeyBoundsPayloadBytes(),
+                response.embeddedIndexPayloadBytes(),
+                response.serializedIndexBytes(),
+                outerSerializationBytes,
+                serializedResponseBytes);
     }
 
     public synchronized ScanCoordinationResponse scan(ScanCoordinationRequest request)
@@ -331,6 +411,12 @@ public class TableWriteCoordinator {
         return pagedCoordination.estimatedSize();
     }
 
+    long pagedCoordinationSpillBytes() {
+        return pagedCoordination.asMap().values().stream()
+                .mapToLong(SerializedScanResponse::spillBytes)
+                .sum();
+    }
+
     long lastSerializedScanResponseBytes() {
         return lastSerializedScanResponseBytes;
     }
@@ -343,13 +429,21 @@ public class TableWriteCoordinator {
         return pagedCoordinationRecomputations.get();
     }
 
-    private void cachePagedResponse(CoordinationKey requestKey, byte[] full) {
+    private void cachePagedResponse(CoordinationKey requestKey, SerializedScanResponse full) {
         pagedCoordination.put(requestKey, full);
     }
 
-    private static int pagedResponseWeight(CoordinationKey key, byte[] response) {
-        long weight = 128L + key.content.length + (long) key.uuid.length() * 2 + response.length;
+    private static int pagedResponseWeight(CoordinationKey key, SerializedScanResponse response) {
+        long weight =
+                128L + key.content.length + (long) key.uuid.length() * 2 + response.heapBytes();
         return (int) Math.min(Integer.MAX_VALUE, weight);
+    }
+
+    private static void closePagedResponse(
+            CoordinationKey key, SerializedScanResponse response, RemovalCause cause) {
+        if (response != null) {
+            response.close();
+        }
     }
 
     private static long parsePagedCacheMemory(String configuredMemory) {

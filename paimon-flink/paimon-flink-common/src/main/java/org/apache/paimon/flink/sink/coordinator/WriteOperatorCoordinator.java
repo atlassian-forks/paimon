@@ -91,6 +91,8 @@ public class WriteOperatorCoordinator implements OperatorCoordinator, Coordinati
             metricGroup.gauge("manifestCacheEntries", manifestCache::estimatedSize);
             metricGroup.gauge("pagedCoordinationCacheBytes", coordinator::pagedCoordinationBytes);
             metricGroup.gauge(
+                    "pagedCoordinationSpillBytes", coordinator::pagedCoordinationSpillBytes);
+            metricGroup.gauge(
                     "pagedCoordinationCacheEntries", coordinator::pagedCoordinationEntries);
             metricGroup.gauge(
                     "lastSerializedScanResponseBytes",

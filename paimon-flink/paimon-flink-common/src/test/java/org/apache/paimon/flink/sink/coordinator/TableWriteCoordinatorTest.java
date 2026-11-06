@@ -26,7 +26,9 @@ import org.apache.paimon.data.BinaryRowWriter;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.flink.FlinkConnectorOptions;
 import org.apache.paimon.fs.Path;
+import org.apache.paimon.operation.RestoreFiles;
 import org.apache.paimon.options.MemorySize;
+import org.apache.paimon.options.Options;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.TableTestBase;
@@ -38,6 +40,10 @@ import org.apache.paimon.table.sink.TableCommitImpl;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.utils.SegmentsCache;
 
+import org.apache.flink.runtime.jobgraph.OperatorID;
+import org.apache.flink.runtime.jobgraph.tasks.TaskOperatorEventGateway;
+import org.apache.flink.runtime.operators.coordination.CoordinationRequest;
+import org.apache.flink.util.SerializedValue;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -45,12 +51,17 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.apache.paimon.data.BinaryRow.EMPTY_ROW;
 import static org.apache.paimon.utils.InstantiationUtil.serializeObject;
 import static org.apache.paimon.utils.SerializationUtils.serializeBinaryRow;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class TableWriteCoordinatorTest extends TableTestBase {
 
@@ -81,6 +92,12 @@ class TableWriteCoordinatorTest extends TableTestBase {
         ScanCoordinationResponse scan = coordinator.scan(request);
         assertThat(scan.snapshot().id()).isEqualTo(latest.id());
         assertThat(scan.extractDataFiles().size()).isEqualTo(initSnapshot ? 2 : 1);
+        assertThat(scan.dataFileCount()).isEqualTo(initSnapshot ? 2 : 1);
+        assertThat(scan.serializedDataFilesBytes()).isPositive();
+        assertThat(scan.rawStatsPayloadBytes()).isPositive();
+        assertThat(scan.rawKeyBoundsPayloadBytes()).isPositive();
+        assertThat(scan.embeddedIndexPayloadBytes()).isZero();
+        assertThat(scan.serializedIndexBytes()).isZero();
     }
 
     @Test
@@ -158,6 +175,61 @@ class TableWriteCoordinatorTest extends TableTestBase {
     }
 
     @Test
+    public void testJobManagerAndTaskManagerSpillPagedResponse() throws Exception {
+        java.nio.file.Path spillDirectory = tempPath.resolve("writer-coordinator-spill");
+        TableWriteCoordinator coordinator =
+                createPagedCoordinator("1 mb", true, spillDirectory.toString());
+        assertThat(spillDirectory).isDirectory();
+        TaskOperatorEventGateway gateway = mock(TaskOperatorEventGateway.class);
+        AtomicBoolean observedJobManagerSpill = new AtomicBoolean();
+        AtomicBoolean observedConfiguredDirectorySpill = new AtomicBoolean();
+        when(gateway.sendRequestToCoordinator(any(), any()))
+                .thenAnswer(
+                        invocation -> {
+                            SerializedValue<CoordinationRequest> serializedRequest =
+                                    invocation.getArgument(1);
+                            PagedCoordinationRequest request =
+                                    (PagedCoordinationRequest)
+                                            serializedRequest.deserializeValue(
+                                                    getClass().getClassLoader());
+                            if (coordinator.pagedCoordinationSpillBytes() > 0) {
+                                observedJobManagerSpill.set(true);
+                            }
+                            if (fileCount(spillDirectory) > 0) {
+                                observedConfiguredDirectorySpill.set(true);
+                            }
+                            return CompletableFuture.completedFuture(
+                                    CoordinationResponseUtils.wrap(coordinator.scan(request)));
+                        });
+
+        CoordinatedWriteRestore restore =
+                new CoordinatedWriteRestore(gateway, new OperatorID(), true, 64, spillDirectory);
+        RestoreFiles restored = restore.restoreFiles(EMPTY_ROW, 0, false, false);
+
+        assertThat(restored.dataFiles()).hasSize(1);
+        assertThat(restored.snapshot()).isNotNull();
+        assertThat(observedJobManagerSpill).isTrue();
+        assertThat(observedConfiguredDirectorySpill).isTrue();
+        assertThat(coordinator.lastSerializedScanResponseBytes()).isGreaterThan(0);
+        assertThat(coordinator.pagedCoordinationSpillBytes()).isZero();
+        assertThat(coordinator.pagedCoordinationEntries()).isZero();
+        assertThat(fileCount(spillDirectory)).isZero();
+    }
+
+    @Test
+    public void testSpillDirectoryConfiguration() {
+        assertThat(WriterCoordinatorSpillFile.configuredDirectory(new Options())).isNull();
+
+        Options relativeDirectory = new Options();
+        relativeDirectory.set(
+                FlinkConnectorOptions.SINK_WRITER_COORDINATOR_SPILL_DIRECTORY,
+                "relative-spill-directory");
+        assertThatThrownBy(() -> WriterCoordinatorSpillFile.configuredDirectory(relativeDirectory))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must be absolute");
+    }
+
+    @Test
     public void testPagedResponseCacheIsUnboundedByDefault() throws Exception {
         TableWriteCoordinator coordinator = createPagedCoordinator(null);
         byte[] requestContent = serializeObject(scanRequest());
@@ -212,22 +284,40 @@ class TableWriteCoordinatorTest extends TableTestBase {
     }
 
     private TableWriteCoordinator createPagedCoordinator(String cacheMemory) throws Exception {
+        return createPagedCoordinator(cacheMemory, false, null);
+    }
+
+    private TableWriteCoordinator createPagedCoordinator(String cacheMemory, boolean spillEnabled)
+            throws Exception {
+        return createPagedCoordinator(cacheMemory, spillEnabled, null);
+    }
+
+    private TableWriteCoordinator createPagedCoordinator(
+            String cacheMemory, boolean spillEnabled, String spillDirectory) throws Exception {
         Identifier identifier =
                 new Identifier(
                         "db",
                         cacheMemory == null
-                                ? "paged_default"
-                                : "paged_" + cacheMemory.replace(' ', '_'));
+                                ? "paged_default_" + spillEnabled
+                                : "paged_" + cacheMemory.replace(' ', '_') + '_' + spillEnabled);
         Schema.Builder schemaBuilder =
                 Schema.newBuilder()
                         .column("f0", DataTypes.INT())
                         .option(
                                 FlinkConnectorOptions.SINK_WRITER_COORDINATOR_PAGE_SIZE.key(),
-                                "16 bytes");
+                                "16 bytes")
+                        .option(
+                                FlinkConnectorOptions.SINK_WRITER_COORDINATOR_SPILL_ENABLED.key(),
+                                String.valueOf(spillEnabled));
         if (cacheMemory != null) {
             schemaBuilder.option(
                     FlinkConnectorOptions.SINK_WRITER_COORDINATOR_PAGED_CACHE_MEMORY.key(),
                     cacheMemory);
+        }
+        if (spillDirectory != null) {
+            schemaBuilder.option(
+                    FlinkConnectorOptions.SINK_WRITER_COORDINATOR_SPILL_DIRECTORY.key(),
+                    spillDirectory);
         }
         Schema schema = schemaBuilder.build();
         catalog.createDatabase("db", true);
@@ -235,6 +325,13 @@ class TableWriteCoordinatorTest extends TableTestBase {
         FileStoreTable table = getTable(identifier);
         write(table, GenericRow.of(1));
         return new TableWriteCoordinator(table);
+    }
+
+    private static long fileCount(java.nio.file.Path directory) throws Exception {
+        try (java.util.stream.Stream<java.nio.file.Path> files =
+                java.nio.file.Files.list(directory)) {
+            return files.count();
+        }
     }
 
     private ScanCoordinationRequest scanRequest() {

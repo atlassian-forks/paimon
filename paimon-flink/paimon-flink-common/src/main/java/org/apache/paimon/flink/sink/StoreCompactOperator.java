@@ -312,7 +312,9 @@ public class StoreCompactOperator extends PrepareCommitOperator<RowData, Committ
                             initialCommitUser,
                             fullCompaction);
 
-            operator.setWriteRestore(new CoordinatedWriteRestore(gateway, operatorID));
+            operator.setWriteRestore(
+                    CoordinatedWriteRestore.fromTableOptions(
+                            gateway, operatorID, table.coreOptions().toConfiguration()));
             return (T) operator;
         }
 
