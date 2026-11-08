@@ -43,6 +43,7 @@ import org.apache.paimon.utils.SegmentsCache;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobgraph.tasks.TaskOperatorEventGateway;
 import org.apache.flink.runtime.operators.coordination.CoordinationRequest;
+import org.apache.flink.runtime.operators.coordination.CoordinationResponse;
 import org.apache.flink.util.SerializedValue;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -227,6 +228,84 @@ class TableWriteCoordinatorTest extends TableTestBase {
         assertThatThrownBy(() -> WriterCoordinatorSpillFile.configuredDirectory(relativeDirectory))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("must be absolute");
+    }
+
+    @Test
+    public void testSpillFileReleasedWhenCacheIsCleared() throws Exception {
+        java.nio.file.Path spillDirectory = tempPath.resolve("spill-clear");
+        TableWriteCoordinator coordinator =
+                createPagedCoordinator("1 mb", true, spillDirectory.toString());
+        byte[] requestContent = serializeObject(scanRequest());
+
+        PagedCoordinationResponse first =
+                coordinator.scan(
+                        new PagedCoordinationRequest(requestContent, "spill-clear-request", null));
+        assertThat(first.nextPageToken()).isNotNull();
+        assertThat(fileCount(spillDirectory)).isEqualTo(1);
+        assertThat(coordinator.pagedCoordinationSpillBytes()).isGreaterThan(0);
+
+        coordinator.clearPagedCoordination();
+
+        assertThat(fileCount(spillDirectory)).isZero();
+        assertThat(coordinator.pagedCoordinationSpillBytes()).isZero();
+    }
+
+    @Test
+    public void testSpillFileReleasedForInvalidPageToken() throws Exception {
+        java.nio.file.Path spillDirectory = tempPath.resolve("spill-invalid-token");
+        TableWriteCoordinator coordinator =
+                createPagedCoordinator("1 mb", true, spillDirectory.toString());
+        byte[] requestContent = serializeObject(scanRequest());
+        String requestId = "spill-invalid-token-request";
+
+        PagedCoordinationResponse first =
+                coordinator.scan(new PagedCoordinationRequest(requestContent, requestId, null));
+        assertThat(first.nextPageToken()).isNotNull();
+        assertThat(fileCount(spillDirectory)).isEqualTo(1);
+
+        assertThatThrownBy(
+                        () ->
+                                coordinator.scan(
+                                        new PagedCoordinationRequest(
+                                                requestContent, requestId, Integer.MAX_VALUE)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Invalid writer coordinator page token");
+        assertThat(fileCount(spillDirectory)).isZero();
+        assertThat(coordinator.pagedCoordinationEntries()).isZero();
+    }
+
+    @Test
+    public void testEvictedSpillResponseIsDeleted() throws Exception {
+        java.nio.file.Path spillDirectory = tempPath.resolve("spill-eviction");
+        TableWriteCoordinator coordinator =
+                createPagedCoordinator("1 bytes", true, spillDirectory.toString());
+        byte[] requestContent = serializeObject(scanRequest());
+
+        PagedCoordinationResponse first =
+                coordinator.scan(
+                        new PagedCoordinationRequest(
+                                requestContent, "spill-eviction-request", null));
+
+        assertThat(first.nextPageToken()).isNotNull();
+        assertThat(coordinator.pagedCoordinationEntries()).isZero();
+        assertThat(fileCount(spillDirectory)).isZero();
+    }
+
+    @Test
+    public void testTaskManagerSpillFileReleasedWhenRpcFails() throws Exception {
+        java.nio.file.Path spillDirectory = tempPath.resolve("spill-rpc-failure");
+        java.nio.file.Files.createDirectories(spillDirectory);
+        TaskOperatorEventGateway gateway = mock(TaskOperatorEventGateway.class);
+        CompletableFuture<CoordinationResponse> failedRequest = new CompletableFuture<>();
+        failedRequest.completeExceptionally(new RuntimeException("expected RPC failure"));
+        when(gateway.sendRequestToCoordinator(any(), any())).thenReturn(failedRequest);
+        CoordinatedWriteRestore restore =
+                new CoordinatedWriteRestore(gateway, new OperatorID(), true, 64, spillDirectory);
+
+        assertThatThrownBy(() -> restore.restoreFiles(EMPTY_ROW, 0, false, false))
+                .isInstanceOf(RuntimeException.class)
+                .hasRootCauseMessage("expected RPC failure");
+        assertThat(fileCount(spillDirectory)).isZero();
     }
 
     @Test
