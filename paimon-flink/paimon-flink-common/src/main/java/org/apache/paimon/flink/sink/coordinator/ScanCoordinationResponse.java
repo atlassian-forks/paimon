@@ -51,6 +51,7 @@ public class ScanCoordinationResponse implements CoordinationResponse {
     private transient long rawKeyBoundsPayloadBytes;
     private transient long embeddedIndexPayloadBytes;
     private transient long serializedIndexBytes;
+    private transient int streamedDataFileCount;
 
     public ScanCoordinationResponse(
             @Nullable Snapshot snapshot,
@@ -68,13 +69,7 @@ public class ScanCoordinationResponse implements CoordinationResponse {
             for (DataFileMeta dataFile : dataFiles) {
                 byte[] serializedDataFile = serializer.serializeToBytes(dataFile);
                 this.dataFiles.add(serializedDataFile);
-                serializedDataFilesBytes += serializedDataFile.length;
-                rawStatsPayloadBytes += statsPayloadBytes(dataFile);
-                rawKeyBoundsPayloadBytes +=
-                        (long) dataFile.minKey().getSizeInBytes()
-                                + dataFile.maxKey().getSizeInBytes();
-                byte[] embeddedIndex = dataFile.embeddedIndex();
-                embeddedIndexPayloadBytes += embeddedIndex == null ? 0 : embeddedIndex.length;
+                recordDataFile(dataFile, serializedDataFile.length);
             }
         } else {
             this.dataFiles = null;
@@ -101,7 +96,21 @@ public class ScanCoordinationResponse implements CoordinationResponse {
     }
 
     int dataFileCount() {
-        return dataFiles == null ? 0 : dataFiles.size();
+        return dataFiles == null ? streamedDataFileCount : dataFiles.size();
+    }
+
+    void recordDataFile(DataFileMeta dataFile, int length) {
+        streamedDataFileCount++;
+        serializedDataFilesBytes += length;
+        rawStatsPayloadBytes += statsPayloadBytes(dataFile);
+        rawKeyBoundsPayloadBytes +=
+                (long) dataFile.minKey().getSizeInBytes() + dataFile.maxKey().getSizeInBytes();
+        byte[] embeddedIndex = dataFile.embeddedIndex();
+        embeddedIndexPayloadBytes += embeddedIndex == null ? 0 : embeddedIndex.length;
+    }
+
+    void recordSerializedIndex(int length) {
+        serializedIndexBytes += length;
     }
 
     long serializedDataFilesBytes() {

@@ -21,6 +21,7 @@ package org.apache.paimon.flink.sink.coordinator;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.flink.FlinkConnectorOptions;
 import org.apache.paimon.fs.Path;
@@ -30,15 +31,18 @@ import org.apache.paimon.manifest.ManifestEntry;
 import org.apache.paimon.manifest.ManifestFile;
 import org.apache.paimon.manifest.ManifestFileMeta;
 import org.apache.paimon.manifest.ManifestList;
+import org.apache.paimon.options.Options;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.stats.SimpleStats;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.TableTestBase;
+import org.apache.paimon.table.sink.PartitionBucketMapping;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.utils.Pair;
 import org.apache.paimon.utils.SegmentsCache;
 
 import org.junit.jupiter.api.Test;
+import org.openjdk.jol.info.GraphLayout;
 
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
@@ -60,11 +64,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** Manual benchmark for comparing in-memory and disk-spilled coordinator responses. */
 class TableWriteCoordinatorSpillMemoryBenchmark extends TableTestBase {
 
+    // Keep the measured object graph live across explicit benchmark GC; never used in production.
+    private static volatile Object retainedEntryGraph;
+
     private static final String PROPERTY_PREFIX = "paimon.coordinator.spill.memory.";
 
     @Test
     void coldScan() throws Exception {
         boolean spillEnabled = booleanProperty("spill-enabled", false);
+        boolean streamingResponse = booleanProperty("streaming-response", false);
         int syntheticManifestMb = intProperty("synthetic-manifest-mb", 100);
         int syntheticEntryBytes = intProperty("synthetic-entry-bytes", 512);
         int manifestParallelism = intProperty("manifest-parallelism", 4);
@@ -89,7 +97,8 @@ class TableWriteCoordinatorSpillMemoryBenchmark extends TableTestBase {
         long startNanos = System.nanoTime();
         PagedCoordinationResponse firstPage =
                 coordinator.scan(
-                        new PagedCoordinationRequest(requestContent, "benchmark-request", null));
+                        new PagedCoordinationRequest(
+                                requestContent, "benchmark-request", null, streamingResponse));
         long elapsedMillis = (System.nanoTime() - startNanos) / 1_000_000L;
         long peakHeap = poolPeakUsed();
         long heapAfterRequest = currentHeap();
@@ -109,12 +118,13 @@ class TableWriteCoordinatorSpillMemoryBenchmark extends TableTestBase {
         long spillFilesAfterClear = directoryBytes(spillDirectory);
 
         System.out.printf(
-                "SPILL_MEMORY_RESULT spillEnabled=%s manifestBytes=%,d manifestFiles=%d "
+                "SPILL_MEMORY_RESULT spillEnabled=%s streamingResponse=%s manifestBytes=%,d manifestFiles=%d "
                         + "responseBytes=%,d responseHeapCacheBytes=%,d responseSpillBytes=%,d "
                         + "spillFilesBytes=%,d manifestCacheBytes=%,d elapsedMillis=%,d "
                         + "baselineHeap=%,d peakHeap=%,d heapAfterRequest=%,d "
                         + "heapAfterRequestGc=%,d heapAfterClearGc=%,d spillFilesAfterClear=%,d%n",
                 spillEnabled,
+                streamingResponse,
                 manifestBytes,
                 manifestFiles,
                 responseBytes,
@@ -134,6 +144,116 @@ class TableWriteCoordinatorSpillMemoryBenchmark extends TableTestBase {
         assertThat(responseBytes).isPositive();
         assertThat(responseSpillBytes > 0).isEqualTo(spillEnabled);
         assertThat(spillFilesAfterClear).isZero();
+    }
+
+    /** Isolated object-graph probe, separate from scan/serialization peak measurements. */
+    @Test
+    void manifestEntryFootprint() throws Exception {
+        int syntheticManifestMb = intProperty("synthetic-manifest-mb", 100);
+        int syntheticEntryBytes = intProperty("synthetic-entry-bytes", 512);
+        FileStoreTable table = createTable(false, tempPath.resolve("footprint-spill"), 4);
+        write(table, GenericRow.of(1));
+        replaceWithSyntheticManifest(table, syntheticManifestMb, syntheticEntryBytes);
+        resetManifestCache(table);
+        forceGc();
+        long baselineHeap = currentHeap();
+        long started = System.nanoTime();
+        List<ManifestEntry> entries =
+                table.store()
+                        .newScan()
+                        .withSnapshot(table.latestSnapshot().get())
+                        .withPartitionBucket(EMPTY_ROW, 0)
+                        .plan()
+                        .files();
+        long scanMillis = (System.nanoTime() - started) / 1_000_000L;
+        retainedEntryGraph = entries;
+        try {
+            // Measure post-GC heap before JOL traversal creates its own temporary bookkeeping.
+            forceGc();
+            long heapWithEntries = currentHeap();
+            long entryGraphBytes = GraphLayout.parseInstance(entries).totalSize();
+            System.out.printf(
+                    "MANIFEST_ENTRY_FOOTPRINT entries=%d manifestBytes=%,d "
+                            + "entryGraphBytes=%,d entryGraphBytesPerEntry=%.2f "
+                            + "baselineHeap=%,d heapWithEntriesAfterGc=%,d "
+                            + "heapDeltaAfterGc=%,d scanMillis=%d%n",
+                    entries.size(),
+                    currentSnapshotManifestBytes(table),
+                    entryGraphBytes,
+                    (double) entryGraphBytes / entries.size(),
+                    baselineHeap,
+                    heapWithEntries,
+                    heapWithEntries - baselineHeap,
+                    scanMillis);
+            assertThat(entries).isNotEmpty();
+            assertThat(entryGraphBytes).isGreaterThan(entries.size());
+        } finally {
+            retainedEntryGraph = null;
+        }
+    }
+
+    /** Compare the same partitioned snapshot in separate JVMs using incremental-mapping. */
+    @Test
+    void mappingInitialization() throws Exception {
+        boolean incremental = booleanProperty("incremental-mapping", true);
+        int manifestMb = intProperty("synthetic-manifest-mb", 100);
+        int entryBytes = intProperty("synthetic-entry-bytes", 512);
+        Identifier identifier = new Identifier(database, "mapping_memory");
+        catalog.createTable(
+                identifier,
+                Schema.newBuilder()
+                        .column("k", DataTypes.INT())
+                        .column("pt", DataTypes.INT())
+                        .partitionKeys("pt")
+                        .option(CoreOptions.BUCKET.key(), "1")
+                        .option(CoreOptions.BUCKET_KEY.key(), "k")
+                        .option(CoreOptions.WRITE_ONLY.key(), "true")
+                        .option(CoreOptions.MANIFEST_TARGET_FILE_SIZE.key(), "512 kb")
+                        .option(CoreOptions.SCAN_MANIFEST_PARALLELISM.key(), "4")
+                        .option(CoreOptions.PARTITION_BUCKET_MAPPING_CACHE_ENABLED.key(), "false")
+                        .build(),
+                false);
+        FileStoreTable table = getTable(identifier);
+        write(table, GenericRow.of(1, 0));
+        replaceWithSyntheticManifest(table, manifestMb, entryBytes);
+        Options rescaledOptions = new Options(table.options());
+        rescaledOptions.set(CoreOptions.BUCKET, 32);
+        table = table.copy(table.schema().copy(rescaledOptions.toMap()));
+        resetManifestCache(table);
+        forceGc();
+        long baselineHeap = currentHeap();
+        resetPoolPeaks();
+        long start = System.nanoTime();
+        PartitionBucketMapping mapping =
+                incremental
+                        ? PartitionBucketMapping.loadFromTable(table)
+                        : PartitionBucketMapping.loadFromEntries(
+                                table.store().newScan().readSimpleEntries(), table.schema());
+        long elapsedMillis = (System.nanoTime() - start) / 1_000_000L;
+        long peakHeap = poolPeakUsed();
+        long heapAfterInit = currentHeap();
+        retainedEntryGraph = mapping;
+        try {
+            for (int i = 0; i < 1024; i++) {
+                assertThat(mapping.resolveNumBuckets(BinaryRow.singleColumn(i))).isEqualTo(1);
+            }
+            assertThat(mapping.resolveNumBuckets(BinaryRow.singleColumn(9999))).isEqualTo(32);
+            forceGc();
+            System.out.printf(
+                    "MAPPING_MEMORY_RESULT incremental=%s entries=%d manifestBytes=%d "
+                            + "baselineHeap=%d peakHeap=%d heapAfterInit=%d heapAfterGc=%d "
+                            + "elapsedMillis=%d%n",
+                    incremental,
+                    (manifestMb * 1024L * 1024L + entryBytes - 1) / entryBytes,
+                    currentSnapshotManifestBytes(table),
+                    baselineHeap,
+                    peakHeap,
+                    heapAfterInit,
+                    currentHeap(),
+                    elapsedMillis);
+        } finally {
+            retainedEntryGraph = null;
+        }
     }
 
     private FileStoreTable createTable(
@@ -197,7 +317,15 @@ class TableWriteCoordinatorSpillMemoryBenchmark extends TableTestBase {
                             null,
                             null,
                             null);
-            entries.add(ManifestEntry.create(FileKind.ADD, EMPTY_ROW, 0, 1, file));
+            entries.add(
+                    ManifestEntry.create(
+                            FileKind.ADD,
+                            table.partitionKeys().isEmpty()
+                                    ? EMPTY_ROW
+                                    : BinaryRow.singleColumn(i % 1024),
+                            0,
+                            1,
+                            file));
         }
 
         ManifestFile manifestFile = table.store().manifestFileFactory().create();

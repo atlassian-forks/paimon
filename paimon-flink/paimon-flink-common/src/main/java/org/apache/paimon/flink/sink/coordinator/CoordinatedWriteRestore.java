@@ -24,14 +24,18 @@ import org.apache.paimon.operation.WriteRestore;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.utils.ArrayUtils;
 import org.apache.paimon.utils.InstantiationUtil;
+import org.apache.paimon.utils.MetadataInitializationLog;
 
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobgraph.tasks.TaskOperatorEventGateway;
 import org.apache.flink.runtime.operators.coordination.CoordinationRequest;
 import org.apache.flink.util.SerializedValue;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -49,6 +53,8 @@ import static org.apache.paimon.utils.SerializationUtils.serializeBinaryRow;
  * is to avoid a large number of duplicate scans of manifest files.
  */
 public class CoordinatedWriteRestore implements WriteRestore {
+
+    private static final Logger LOG = LoggerFactory.getLogger(CoordinatedWriteRestore.class);
 
     private final TaskOperatorEventGateway gateway;
     private final OperatorID operatorID;
@@ -118,30 +124,49 @@ public class CoordinatedWriteRestore implements WriteRestore {
             int bucket,
             boolean scanDynamicBucketIndex,
             boolean scanDeleteVectorsIndex) {
-        ScanCoordinationRequest coordinationRequest =
-                new ScanCoordinationRequest(
-                        serializeBinaryRow(partition),
-                        bucket,
-                        scanDynamicBucketIndex,
-                        scanDeleteVectorsIndex);
-        try {
-            byte[] requestContent = serializeObject(coordinationRequest);
-            ScanCoordinationResponse response =
-                    spillEnabled
-                            ? requestAndDeserializeSpilled(requestContent)
-                            : requestAndDeserializeInMemory(requestContent);
-            return new RestoreFiles(
-                    response.snapshot(),
-                    response.totalBuckets(),
-                    response.extractDataFiles(),
-                    response.extractDynamicBucketIndex(),
-                    response.extractDeletionVectorsIndex());
-        } catch (IOException
-                | ExecutionException
-                | InterruptedException
-                | ClassNotFoundException e) {
-            throw new RuntimeException(e);
+        try (MetadataInitializationLog initialization =
+                MetadataInitializationLog.start(
+                        LOG,
+                        "coordinated-restore-rpc-and-decode",
+                        "operator="
+                                + operatorID
+                                + ",bucket="
+                                + bucket
+                                + ",spill="
+                                + spillEnabled)) {
+            ScanCoordinationRequest coordinationRequest =
+                    new ScanCoordinationRequest(
+                            serializeBinaryRow(partition),
+                            bucket,
+                            scanDynamicBucketIndex,
+                            scanDeleteVectorsIndex);
+            try {
+                byte[] requestContent = serializeObject(coordinationRequest);
+                RestoreFiles restored =
+                        spillEnabled
+                                ? requestAndDeserializeSpilled(requestContent)
+                                : extractRestoreFiles(
+                                        requestAndDeserializeInMemory(requestContent));
+                initialization.complete(
+                        restored.dataFiles() == null ? 0 : restored.dataFiles().size(), -1);
+                return restored;
+            } catch (IOException
+                    | ExecutionException
+                    | InterruptedException
+                    | ClassNotFoundException e) {
+                throw new RuntimeException(e);
+            }
         }
+    }
+
+    private static RestoreFiles extractRestoreFiles(ScanCoordinationResponse response)
+            throws IOException {
+        return new RestoreFiles(
+                response.snapshot(),
+                response.totalBuckets(),
+                response.extractDataFiles(),
+                response.extractDynamicBucketIndex(),
+                response.extractDeletionVectorsIndex());
     }
 
     private ScanCoordinationResponse requestAndDeserializeInMemory(byte[] requestContent)
@@ -160,7 +185,7 @@ public class CoordinatedWriteRestore implements WriteRestore {
         return InstantiationUtil.deserializeObject(responseContent, getClass().getClassLoader());
     }
 
-    private ScanCoordinationResponse requestAndDeserializeSpilled(byte[] requestContent)
+    private RestoreFiles requestAndDeserializeSpilled(byte[] requestContent)
             throws IOException, ExecutionException, InterruptedException, ClassNotFoundException {
         WriterCoordinatorSpillFile spillFile = WriterCoordinatorSpillFile.create(spillDirectory);
         try {
@@ -175,7 +200,15 @@ public class CoordinatedWriteRestore implements WriteRestore {
                 } while (nextPageToken != null);
             }
             try (InputStream input = spillFile.inputStream(spillBufferSize)) {
-                return InstantiationUtil.deserializeObject(input, getClass().getClassLoader());
+                input.mark(Integer.BYTES);
+                int magic = new DataInputStream(input).readInt();
+                input.reset();
+                if (magic == StreamingScanResponse.MAGIC) {
+                    return StreamingScanResponse.read(input, spillFile.size());
+                }
+                // An older JM ignores the capability and sends a Java-serialized response.
+                return extractRestoreFiles(
+                        InstantiationUtil.deserializeObject(input, getClass().getClassLoader()));
             }
         } finally {
             spillFile.close();
@@ -186,7 +219,7 @@ public class CoordinatedWriteRestore implements WriteRestore {
             byte[] requestContent, String uuid, Integer nextPageToken)
             throws IOException, ExecutionException, InterruptedException {
         PagedCoordinationRequest request =
-                new PagedCoordinationRequest(requestContent, uuid, nextPageToken);
+                new PagedCoordinationRequest(requestContent, uuid, nextPageToken, spillEnabled);
         SerializedValue<CoordinationRequest> serializedRequest = new SerializedValue<>(request);
         return CoordinationResponseUtils.unwrap(
                 gateway.sendRequestToCoordinator(operatorID, serializedRequest).get());

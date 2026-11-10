@@ -31,6 +31,7 @@ import org.apache.paimon.options.MemorySize;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.PartitionBucketMapping;
+import org.apache.paimon.utils.MetadataInitializationLog;
 
 import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Cache;
 import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Caffeine;
@@ -42,15 +43,18 @@ import org.slf4j.LoggerFactory;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.apache.paimon.deletionvectors.DeletionVectorsIndexFile.DELETION_VECTORS_INDEX;
@@ -77,7 +81,7 @@ public class TableWriteCoordinator {
     private final int spillBufferSize;
     @Nullable private final Path spillDirectory;
     private final Cache<CoordinationKey, SerializedScanResponse> pagedCoordination;
-    private final Cache<CoordinationKey, Snapshot> pagedCoordinationSnapshots;
+    private final Cache<CoordinationKey, Optional<Snapshot>> pagedCoordinationSnapshots;
     private final long pagedCoordinationMaxBytes;
     private final AtomicLong pagedCoordinationRecomputations = new AtomicLong();
 
@@ -165,7 +169,11 @@ public class TableWriteCoordinator {
      * exception is swallowed and logged.
      */
     private void warmManifestCache() {
-        try {
+        try (MetadataInitializationLog initialization =
+                MetadataInitializationLog.start(
+                        LOG,
+                        "coordinator-manifest-warmup",
+                        table.name() + ",snapshot=" + snapshot.id())) {
             long startTime = System.currentTimeMillis();
             // Clear any leftover partition/bucket filter from a previous scan() so the whole
             // snapshot is read; each scan() call re-applies its own withPartitionBucket afterward.
@@ -174,6 +182,7 @@ public class TableWriteCoordinator {
                     "Warmed writer coordinator manifest cache for snapshot {}, duration: {}ms",
                     snapshot.id(),
                     System.currentTimeMillis() - startTime);
+            initialization.complete(-1, -1);
         } catch (Exception e) {
             LOG.warn(
                     "Failed to warm writer coordinator manifest cache for snapshot {}. "
@@ -185,30 +194,39 @@ public class TableWriteCoordinator {
 
     public synchronized PagedCoordinationResponse scan(PagedCoordinationRequest request)
             throws IOException {
+        long startedNanos = System.nanoTime();
         Integer pageToken = request.pageToken();
-        CoordinationKey requestKey = new CoordinationKey(request.content(), request.requestId());
+        CoordinationKey requestKey = new CoordinationKey(request);
         SerializedScanResponse full;
         boolean newlySerialized = false;
+        Snapshot requestSnapshot = snapshot;
         if (pageToken != null) {
             full = pagedCoordination.getIfPresent(requestKey);
             if (full == null) {
-                Snapshot requestSnapshot = pagedCoordinationSnapshots.getIfPresent(requestKey);
-                if (requestSnapshot == null) {
+                Optional<Snapshot> pinnedSnapshot =
+                        pagedCoordinationSnapshots.getIfPresent(requestKey);
+                if (pinnedSnapshot == null) {
                     throw new IllegalStateException(
                             "Paged writer coordinator request expired before completion. "
                                     + "Increase sink.writer-coordinator.paged-cache-expire-after-access "
                                     + "or sink.writer-coordinator.paged-cache-memory.");
                 }
+                requestSnapshot = pinnedSnapshot.orElse(null);
                 pagedCoordinationRecomputations.incrementAndGet();
-                full = serializeScanResponse(request.content(), requestSnapshot);
+                full =
+                        serializeScanResponse(
+                                request.content(), requestSnapshot, request.streamingResponse());
                 newlySerialized = true;
             }
         } else {
-            Snapshot requestSnapshot = snapshot;
-            full = serializeScanResponse(request.content(), requestSnapshot);
+            full =
+                    serializeScanResponse(
+                            request.content(), requestSnapshot, request.streamingResponse());
             newlySerialized = true;
         }
 
+        long preparedNanos = System.nanoTime();
+        long responseLength = full.length();
         int offset = pageToken == null ? 0 : pageToken;
         if (offset < 0 || offset >= full.length()) {
             if (newlySerialized) {
@@ -231,6 +249,7 @@ public class TableWriteCoordinator {
             }
             throw e;
         }
+        long pageReadNanos = System.nanoTime();
         int len = content.length;
         Integer nextPageToken = offset + len;
         if (nextPageToken >= full.length()) {
@@ -240,53 +259,153 @@ public class TableWriteCoordinator {
                 full.close();
             }
         } else if (newlySerialized) {
-            Snapshot requestSnapshot =
-                    pageToken == null
-                            ? snapshot
-                            : pagedCoordinationSnapshots.getIfPresent(requestKey);
-            if (requestSnapshot != null) {
-                pagedCoordinationSnapshots.put(requestKey, requestSnapshot);
-                cachePagedResponse(requestKey, full);
-                if (pagedCoordinationMaxBytes >= 0
-                        && pagedCoordination.getIfPresent(requestKey) == null) {
-                    LOG.warn(
-                            "Writer coordinator response ({} bytes) exceeds or was evicted from "
-                                    + "the paged response cache ({} bytes). Later pages will be "
-                                    + "rebuilt against snapshot {}.",
-                            full.length(),
-                            pagedCoordinationMaxBytes,
-                            requestSnapshot.id());
-                }
+            // An empty table has no snapshot yet, but its multi-page response still needs
+            // caching and a pinned state. Optional.empty differs from an expired request.
+            pagedCoordinationSnapshots.put(requestKey, Optional.ofNullable(requestSnapshot));
+            cachePagedResponse(requestKey, full);
+            if (pagedCoordinationMaxBytes >= 0
+                    && pagedCoordination.getIfPresent(requestKey) == null) {
+                LOG.warn(
+                        "Writer coordinator response ({} bytes) exceeds or was evicted from "
+                                + "the paged response cache ({} bytes). Later pages will be "
+                                + "rebuilt against snapshot {}.",
+                        full.length(),
+                        pagedCoordinationMaxBytes,
+                        requestSnapshot == null ? "none" : requestSnapshot.id());
+            }
+        }
+        long totalMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
+        String source = pageToken == null ? "initial" : newlySerialized ? "rebuilt" : "cache";
+        String format =
+                "Writer coordinator page served: table={}, requestId={}, pageToken={}, "
+                        + "source={}, prepareResponseMs={}, readPageMs={}, pageHandlingMs={}, "
+                        + "fullResponseBytes={}, pageBytes={}, nextPageToken={}";
+        if (newlySerialized || totalMs >= 1_000 || LOG.isDebugEnabled()) {
+            Object[] arguments = {
+                table.name(),
+                request.requestId(),
+                pageToken,
+                source,
+                TimeUnit.NANOSECONDS.toMillis(preparedNanos - startedNanos),
+                TimeUnit.NANOSECONDS.toMillis(pageReadNanos - preparedNanos),
+                totalMs,
+                responseLength,
+                len,
+                nextPageToken
+            };
+            if (newlySerialized || totalMs >= 1_000) {
+                LOG.info(format, arguments);
             } else {
-                full.close();
+                LOG.debug(format, arguments);
             }
         }
         return new PagedCoordinationResponse(content, nextPageToken);
     }
 
     private SerializedScanResponse serializeScanResponse(
-            byte[] requestContent, Snapshot requestSnapshot) throws IOException {
-        ScanCoordinationRequest coordination;
-        try {
-            coordination = deserializeObject(requestContent, getClass().getClassLoader());
-        } catch (ClassNotFoundException e) {
-            throw new RuntimeException(e);
+            byte[] requestContent, @Nullable Snapshot requestSnapshot, boolean streamingResponse)
+            throws IOException {
+        try (MetadataInitializationLog initialization =
+                MetadataInitializationLog.start(
+                        LOG,
+                        "coordinator-scan-and-serialize",
+                        table.name()
+                                + ",snapshot="
+                                + (requestSnapshot == null ? "none" : requestSnapshot.id()))) {
+            ScanCoordinationRequest coordination;
+            try {
+                coordination = deserializeObject(requestContent, getClass().getClassLoader());
+            } catch (ClassNotFoundException e) {
+                throw new RuntimeException(e);
+            }
+            ScanCoordinationResponse response;
+            SerializedScanResponse full;
+            if (spillEnabled && streamingResponse) {
+                ScanCoordinationResponse[] statistics = new ScanCoordinationResponse[1];
+                full =
+                        SerializedScanResponse.spilled(
+                                output ->
+                                        statistics[0] =
+                                                writeStreamingResponse(
+                                                        coordination, requestSnapshot, output),
+                                spillBufferSize,
+                                spillDirectory);
+                response = statistics[0];
+            } else {
+                // Old clients (or spill disabled) retain the original wire format and scan path.
+                response = scan(coordination, requestSnapshot);
+                full =
+                        spillEnabled
+                                ? SerializedScanResponse.spilled(
+                                        response, spillBufferSize, spillDirectory)
+                                : SerializedScanResponse.inMemory(response);
+            }
+            lastSerializedScanResponseBytes = full.length();
+            maxSerializedScanResponseBytes =
+                    Math.max(maxSerializedScanResponseBytes, full.length());
+            logScanResponseSize(
+                    coordination, response, full.length(), spillEnabled && streamingResponse);
+            initialization.complete(response.dataFileCount(), full.length());
+            return full;
         }
-        ScanCoordinationResponse response = scan(coordination, requestSnapshot);
-        SerializedScanResponse full =
-                spillEnabled
-                        ? SerializedScanResponse.spilled(response, spillBufferSize, spillDirectory)
-                        : SerializedScanResponse.inMemory(response);
-        lastSerializedScanResponseBytes = full.length();
-        maxSerializedScanResponseBytes = Math.max(maxSerializedScanResponseBytes, full.length());
-        logScanResponseSize(coordination, response, full.length());
-        return full;
+    }
+
+    private ScanCoordinationResponse writeStreamingResponse(
+            ScanCoordinationRequest request,
+            @Nullable Snapshot requestSnapshot,
+            OutputStream output)
+            throws IOException {
+        StreamingScanResponse.Writer writer =
+                new StreamingScanResponse.Writer(output, requestSnapshot);
+        if (requestSnapshot == null) {
+            return writer.finish(null, null, null);
+        }
+        BinaryRow partition = deserializeBinaryRow(request.partition());
+        FileStoreScan requestScan = table.store().newScan().withSnapshot(requestSnapshot);
+        if (table.coreOptions().manifestDeleteFileDropStats()) {
+            requestScan.dropStats();
+        }
+        // No value predicate is applied to this restore scan, so no whole-bucket stats
+        // post-filter is needed. The iterator still performs ADD/DELETE reconciliation.
+        // It bounds manifest read batches, but does not spill the deletion identifier set.
+        Iterator<ManifestEntry> entries =
+                requestScan.withPartitionBucket(partition, request.bucket()).readFileIterator();
+        Integer totalBuckets = null;
+        while (entries.hasNext()) {
+            ManifestEntry entry = entries.next();
+            if (totalBuckets != null && totalBuckets != entry.totalBuckets()) {
+                throw new IOException(
+                        "Bucket data files have different total bucket numbers: "
+                                + totalBuckets
+                                + " vs "
+                                + entry.totalBuckets());
+            }
+            totalBuckets = entry.totalBuckets();
+            writer.writeFile(entry.file());
+        }
+        totalBuckets = resolveTotalBuckets(totalBuckets, requestSnapshot, partition);
+        IndexFileMeta dynamicIndex =
+                request.scanDynamicBucketIndex()
+                        ? indexFileHandler
+                                .scanHashIndex(requestSnapshot, partition, request.bucket())
+                                .orElse(null)
+                        : null;
+        List<IndexFileMeta> deleteVectors =
+                request.scanDeleteVectorsIndex()
+                        ? indexFileHandler.scan(
+                                requestSnapshot,
+                                DELETION_VECTORS_INDEX,
+                                partition,
+                                request.bucket())
+                        : null;
+        return writer.finish(totalBuckets, dynamicIndex, deleteVectors);
     }
 
     private void logScanResponseSize(
             ScanCoordinationRequest request,
             ScanCoordinationResponse response,
-            long serializedResponseBytes) {
+            long serializedResponseBytes,
+            boolean streamingResponse) {
         int dataFileCount = response.dataFileCount();
         long serializedDataFilesBytes = response.serializedDataFilesBytes();
         long averageSerializedDataFileBytes =
@@ -304,7 +423,7 @@ public class TableWriteCoordinator {
                         + "averageSerializedDataFileBytes={}, rawStatsPayloadBytes={}, "
                         + "rawKeyBoundsPayloadBytes={}, embeddedIndexPayloadBytes={}, "
                         + "serializedIndexBytes={}, outerSerializationBytes={}, "
-                        + "serializedResponseBytes={}",
+                        + "serializedResponseBytes={}, responseFormat={}",
                 table.name(),
                 response.snapshot() == null ? null : response.snapshot().id(),
                 Arrays.hashCode(request.partition()),
@@ -318,7 +437,8 @@ public class TableWriteCoordinator {
                 response.embeddedIndexPayloadBytes(),
                 response.serializedIndexBytes(),
                 outerSerializationBytes,
-                serializedResponseBytes);
+                serializedResponseBytes,
+                streamingResponse ? "streaming-v1" : "java-serialization");
     }
 
     public synchronized ScanCoordinationResponse scan(ScanCoordinationRequest request)
@@ -326,7 +446,8 @@ public class TableWriteCoordinator {
         return scan(request, snapshot);
     }
 
-    private ScanCoordinationResponse scan(ScanCoordinationRequest request, Snapshot requestSnapshot)
+    private ScanCoordinationResponse scan(
+            ScanCoordinationRequest request, @Nullable Snapshot requestSnapshot)
             throws IOException {
         if (requestSnapshot == null) {
             return new ScanCoordinationResponse(null, null, null, null, null);
@@ -343,22 +464,7 @@ public class TableWriteCoordinator {
         List<ManifestEntry> entries =
                 requestScan.withPartitionBucket(partition, bucket).plan().files();
         Integer totalBuckets = WriteRestore.extractDataFiles(entries, restoreFiles);
-        if (totalBuckets == null && table.schema().numBuckets() > 0) {
-            // Empty buckets have no file metadata. Recover the partition layout from the
-            // request snapshot, including when an evicted paged response is recomputed.
-            // Load lazily so disabling manifest prefetch still avoids a startup scan.
-            if (bucketMapping == null || bucketMappingSnapshotId != requestSnapshot.id()) {
-                bucketMapping =
-                        PartitionBucketMapping.loadFromEntries(
-                                table.store()
-                                        .newScan()
-                                        .withSnapshot(requestSnapshot)
-                                        .readSimpleEntries(),
-                                table.schema());
-                bucketMappingSnapshotId = requestSnapshot.id();
-            }
-            totalBuckets = bucketMapping.resolveNumBuckets(partition);
-        }
+        totalBuckets = resolveTotalBuckets(totalBuckets, requestSnapshot, partition);
 
         IndexFileMeta dynamicBucketIndex = null;
         if (request.scanDynamicBucketIndex()) {
@@ -381,8 +487,31 @@ public class TableWriteCoordinator {
                 deleteVectorsIndex);
     }
 
+    @Nullable
+    private Integer resolveTotalBuckets(
+            @Nullable Integer totalBuckets, Snapshot requestSnapshot, BinaryRow partition) {
+        if (totalBuckets == null && table.schema().numBuckets() > 0) {
+            // Empty buckets have no file metadata. Recover the partition layout from the
+            // request snapshot, including when an evicted paged response is recomputed.
+            // Load lazily so disabling manifest prefetch still avoids a startup scan.
+            if (bucketMapping == null || bucketMappingSnapshotId != requestSnapshot.id()) {
+                bucketMapping =
+                        PartitionBucketMapping.loadFromEntries(
+                                table.store()
+                                        .newScan()
+                                        .withSnapshot(requestSnapshot)
+                                        .readSimpleEntries(),
+                                table.schema());
+                bucketMappingSnapshotId = requestSnapshot.id();
+            }
+            totalBuckets = bucketMapping.resolveNumBuckets(partition);
+        }
+
+        return totalBuckets;
+    }
+
     public void invalidatePagedCoordination(PagedCoordinationRequest request) {
-        CoordinationKey requestKey = new CoordinationKey(request.content(), request.requestId());
+        CoordinationKey requestKey = new CoordinationKey(request);
         pagedCoordination.invalidate(requestKey);
         pagedCoordinationSnapshots.invalidate(requestKey);
     }
@@ -483,10 +612,12 @@ public class TableWriteCoordinator {
 
         private final byte[] content;
         private final String uuid;
+        private final boolean streamingResponse;
 
-        private CoordinationKey(byte[] content, String uuid) {
-            this.content = content;
-            this.uuid = uuid;
+        private CoordinationKey(PagedCoordinationRequest request) {
+            this.content = request.content();
+            this.uuid = request.requestId();
+            this.streamingResponse = request.streamingResponse();
         }
 
         @Override
@@ -495,12 +626,14 @@ public class TableWriteCoordinator {
                 return false;
             }
             CoordinationKey that = (CoordinationKey) o;
-            return Objects.deepEquals(content, that.content) && Objects.equals(uuid, that.uuid);
+            return streamingResponse == that.streamingResponse
+                    && Objects.deepEquals(content, that.content)
+                    && Objects.equals(uuid, that.uuid);
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(Arrays.hashCode(content), uuid);
+            return Objects.hash(Arrays.hashCode(content), uuid, streamingResponse);
         }
     }
 }

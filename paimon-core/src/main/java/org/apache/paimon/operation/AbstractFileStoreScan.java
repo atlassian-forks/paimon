@@ -355,6 +355,14 @@ public abstract class AbstractFileStoreScan implements FileStoreScan {
     }
 
     @Override
+    public Iterator<SimpleFileEntry> readSimpleEntryIterator() {
+        List<ManifestFileMeta> manifests = readManifests().filteredManifests;
+        return scanMode == ScanMode.ALL
+                ? readAndMergeFileEntries(manifests, SimpleFileEntry::from, true)
+                : readAndNoMergeFileEntries(manifests, SimpleFileEntry::from, true);
+    }
+
+    @Override
     public List<PartitionEntry> readPartitionEntries() {
         List<ManifestFileMeta> manifests = readManifests().filteredManifests;
         Map<BinaryRow, PartitionEntry> partitions = new ConcurrentHashMap<>();

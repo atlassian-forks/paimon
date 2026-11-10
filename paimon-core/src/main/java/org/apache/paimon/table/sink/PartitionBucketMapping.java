@@ -20,16 +20,20 @@ package org.apache.paimon.table.sink;
 
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.manifest.FileEntry;
-import org.apache.paimon.manifest.SimpleFileEntry;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.utils.MetadataInitializationLog;
 
 import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Cache;
 import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Caffeine;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.Serializable;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -53,6 +57,8 @@ import java.util.function.Supplier;
 public class PartitionBucketMapping implements Serializable {
 
     private static final long serialVersionUID = 1L;
+
+    private static final Logger LOG = LoggerFactory.getLogger(PartitionBucketMapping.class);
 
     private static final Cache<CacheKey, PartitionBucketMapping> CACHE =
             Caffeine.newBuilder().maximumSize(128).executor(Runnable::run).build();
@@ -150,8 +156,24 @@ public class PartitionBucketMapping implements Serializable {
             return new PartitionBucketMapping(defaultBuckets, Collections.emptyMap());
         }
 
-        List<SimpleFileEntry> entries = table.store().newScan().readSimpleEntries();
-        return loadFromEntries(entries, table.schema());
+        try (MetadataInitializationLog initialization =
+                MetadataInitializationLog.start(
+                        LOG, "partition-bucket-mapping", table.location().toString())) {
+            // Preserve the scan's ADD/DELETE reconciliation, but retain only partition overrides.
+            // The iterator bounds live additions to manifest batches instead of the full snapshot.
+            Iterator<? extends FileEntry> entries =
+                    table.store().newScan().readSimpleEntryIterator();
+            Map<BinaryRow, Integer> partitionBucketMap = new HashMap<>();
+            long entryCount = 0;
+            while (entries.hasNext()) {
+                addPartitionOverride(partitionBucketMap, entries.next(), defaultBuckets);
+                entryCount++;
+            }
+            PartitionBucketMapping mapping =
+                    new PartitionBucketMapping(defaultBuckets, partitionBucketMap);
+            initialization.complete(entryCount, -1);
+            return mapping;
+        }
     }
 
     static void clearCache() {
@@ -175,16 +197,21 @@ public class PartitionBucketMapping implements Serializable {
 
         Map<BinaryRow, Integer> partitionBucketMap = new HashMap<>();
         for (FileEntry entry : entries) {
-            int totalBuckets = entry.totalBuckets();
-            // Only store partitions whose bucket count differs from the default.
-            // This keeps the map empty for partitions that have never been rescaled,
-            // avoiding per-partition BinaryRow copies and Integer allocations entirely.
-            if (totalBuckets > 0 && totalBuckets != defaultBuckets) {
-                BinaryRow partition = entry.partition();
-                partitionBucketMap.putIfAbsent(partition.copy(), totalBuckets);
-            }
+            addPartitionOverride(partitionBucketMap, entry, defaultBuckets);
         }
         return new PartitionBucketMapping(defaultBuckets, partitionBucketMap);
+    }
+
+    private static void addPartitionOverride(
+            Map<BinaryRow, Integer> partitionBucketMap, FileEntry entry, int defaultBuckets) {
+        int totalBuckets = entry.totalBuckets();
+        // Default layouts need no entry. Copy each overridden partition only once, regardless
+        // of how many files it has, and preserve the first observed non-default bucket count.
+        if (totalBuckets > 0
+                && totalBuckets != defaultBuckets
+                && !partitionBucketMap.containsKey(entry.partition())) {
+            partitionBucketMap.put(entry.partition().copy(), totalBuckets);
+        }
     }
 
     /**
@@ -204,6 +231,11 @@ public class PartitionBucketMapping implements Serializable {
             }
         }
         return defaultBucketCount;
+    }
+
+    /** Number of stored overrides, not the number of files or the mapping's heap size. */
+    public int partitionOverrideCount() {
+        return partitionBucketMap.size();
     }
 
     static class CacheKey {

@@ -32,6 +32,8 @@ import org.apache.flink.runtime.operators.coordination.CoordinationRequestHandle
 import org.apache.flink.runtime.operators.coordination.CoordinationResponse;
 import org.apache.flink.runtime.operators.coordination.OperatorCoordinator;
 import org.apache.flink.runtime.operators.coordination.OperatorEvent;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
@@ -39,6 +41,7 @@ import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_WRITER_COORDINATOR_CACHE_EXPIRE_AFTER_ACCESS;
 import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_WRITER_COORDINATOR_CACHE_MEMORY;
@@ -51,6 +54,9 @@ import static org.apache.paimon.utils.ThreadPoolUtils.createCachedThreadPool;
  * list of initialization files required for write operators.
  */
 public class WriteOperatorCoordinator implements OperatorCoordinator, CoordinationRequestHandler {
+
+    private static final Logger LOG = LoggerFactory.getLogger(WriteOperatorCoordinator.class);
+    private static final long SLOW_REQUEST_MILLIS = 1_000;
 
     private final FileStoreTable table;
     @Nullable private final MetricGroup metricGroup;
@@ -119,9 +125,23 @@ public class WriteOperatorCoordinator implements OperatorCoordinator, Coordinati
     @Override
     public CompletableFuture<CoordinationResponse> handleCoordinationRequest(
             CoordinationRequest request) {
+        long receivedNanos = System.nanoTime();
+        int queueSizeAtSubmission = executor.getQueue().size();
         CompletableFuture<CoordinationResponse> future = new CompletableFuture<>();
         executor.execute(
                 () -> {
+                    long startedNanos = System.nanoTime();
+                    if (LOG.isDebugEnabled()) {
+                        LOG.debug(
+                                "Writer coordinator request started: table={}, requestType={}, "
+                                        + "requestId={}, pageToken={}, queueWaitMs={}, queueSize={}",
+                                table.name(),
+                                request.getClass().getSimpleName(),
+                                requestId(request),
+                                pageToken(request),
+                                TimeUnit.NANOSECONDS.toMillis(startedNanos - receivedNanos),
+                                executor.getQueue().size());
+                    }
                     try {
                         CoordinationResponse response;
                         if (request instanceof PagedCoordinationRequest) {
@@ -135,16 +155,94 @@ public class WriteOperatorCoordinator implements OperatorCoordinator, Coordinati
                             throw new UnsupportedOperationException(
                                     "Unsupported request type: " + request);
                         }
-                        future.complete(CoordinationResponseUtils.wrap(response));
+                        CoordinationResponse wrapped = CoordinationResponseUtils.wrap(response);
+                        logRequestDuration(
+                                request,
+                                receivedNanos,
+                                startedNanos,
+                                queueSizeAtSubmission,
+                                response,
+                                null);
+                        future.complete(wrapped);
                     } catch (Exception e) {
                         if (request instanceof PagedCoordinationRequest) {
                             coordinator.invalidatePagedCoordination(
                                     (PagedCoordinationRequest) request);
                         }
+                        logRequestDuration(
+                                request,
+                                receivedNanos,
+                                startedNanos,
+                                queueSizeAtSubmission,
+                                null,
+                                e);
                         future.completeExceptionally(e);
                     }
                 });
         return future;
+    }
+
+    private void logRequestDuration(
+            CoordinationRequest request,
+            long receivedNanos,
+            long startedNanos,
+            int queueSizeAtSubmission,
+            @Nullable CoordinationResponse response,
+            @Nullable Exception failure) {
+        long finishedNanos = System.nanoTime();
+        long totalMs = TimeUnit.NANOSECONDS.toMillis(finishedNanos - receivedNanos);
+        boolean firstPage =
+                request instanceof PagedCoordinationRequest && pageToken(request) == null;
+        // Fast continuation pages can be very numerous. Keep them at DEBUG, while first pages,
+        // slow requests (including queue wait), and failures remain visible by default.
+        boolean info = firstPage || totalMs >= SLOW_REQUEST_MILLIS;
+        if (failure == null && !info && !LOG.isDebugEnabled()) {
+            return;
+        }
+        PagedCoordinationResponse page =
+                response instanceof PagedCoordinationResponse
+                        ? (PagedCoordinationResponse) response
+                        : null;
+        String format =
+                "Writer coordinator request finished: table={}, requestType={}, "
+                        + "requestId={}, pageToken={}, success={}, queueWaitMs={}, executionMs={}, "
+                        + "totalMs={}, queueSizeAtSubmission={}, queueSizeAtFinish={}, "
+                        + "responseBytes={}, nextPageToken={}";
+        Object[] arguments = {
+            table.name(),
+            request.getClass().getSimpleName(),
+            requestId(request),
+            pageToken(request),
+            failure == null,
+            TimeUnit.NANOSECONDS.toMillis(startedNanos - receivedNanos),
+            TimeUnit.NANOSECONDS.toMillis(finishedNanos - startedNanos),
+            totalMs,
+            queueSizeAtSubmission,
+            executor.getQueue().size(),
+            page == null ? -1 : page.content().length,
+            page == null ? null : page.nextPageToken(),
+            failure
+        };
+        if (failure != null) {
+            LOG.warn(format, arguments);
+        } else if (info) {
+            LOG.info(format, arguments);
+        } else {
+            LOG.debug(format, arguments);
+        }
+    }
+
+    private static String requestId(CoordinationRequest request) {
+        return request instanceof PagedCoordinationRequest
+                ? ((PagedCoordinationRequest) request).requestId()
+                : "n/a";
+    }
+
+    @Nullable
+    private static Integer pageToken(CoordinationRequest request) {
+        return request instanceof PagedCoordinationRequest
+                ? ((PagedCoordinationRequest) request).pageToken()
+                : null;
     }
 
     @Override
