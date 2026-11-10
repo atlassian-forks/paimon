@@ -23,9 +23,13 @@ import org.apache.paimon.manifest.FileEntry;
 import org.apache.paimon.manifest.SimpleFileEntry;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.utils.MetadataInitializationLog;
 
 import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Cache;
 import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Caffeine;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
 import java.util.Collections;
@@ -53,6 +57,8 @@ import java.util.function.Supplier;
 public class PartitionBucketMapping implements Serializable {
 
     private static final long serialVersionUID = 1L;
+
+    private static final Logger LOG = LoggerFactory.getLogger(PartitionBucketMapping.class);
 
     private static final Cache<CacheKey, PartitionBucketMapping> CACHE =
             Caffeine.newBuilder().maximumSize(128).executor(Runnable::run).build();
@@ -150,8 +156,14 @@ public class PartitionBucketMapping implements Serializable {
             return new PartitionBucketMapping(defaultBuckets, Collections.emptyMap());
         }
 
-        List<SimpleFileEntry> entries = table.store().newScan().readSimpleEntries();
-        return loadFromEntries(entries, table.schema());
+        try (MetadataInitializationLog initialization =
+                MetadataInitializationLog.start(
+                        LOG, "partition-bucket-mapping", table.location().toString())) {
+            List<SimpleFileEntry> entries = table.store().newScan().readSimpleEntries();
+            PartitionBucketMapping mapping = loadFromEntries(entries, table.schema());
+            initialization.complete(entries.size(), -1);
+            return mapping;
+        }
     }
 
     static void clearCache() {

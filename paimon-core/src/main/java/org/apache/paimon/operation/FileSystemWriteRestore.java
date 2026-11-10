@@ -30,6 +30,7 @@ import org.apache.paimon.partition.PartitionPredicate;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.sink.PartitionBucketMapping;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.utils.MetadataInitializationLog;
 import org.apache.paimon.utils.SnapshotManager;
 
 import org.apache.paimon.shade.caffeine2.com.github.benmanes.caffeine.cache.Cache;
@@ -148,27 +149,34 @@ public class FileSystemWriteRestore implements WriteRestore {
                 return prefetch;
             }
 
-            LOG.info(
-                    "FileSystemWriteRestore started prefetching manifestEntries for table {}, snapshot {}",
-                    snapshotManager.tablePath(),
-                    snapshot.id());
-            List<ManifestEntry> manifestEntries = fetchManifestEntries(snapshot, null, null);
-            LOG.info(
-                    "FileSystemWriteRestore prefetched manifestEntries for table {}, snapshot {}: {} entries",
-                    snapshotManager.tablePath(),
-                    snapshot.id(),
-                    manifestEntries.size());
+            try (MetadataInitializationLog initialization =
+                    MetadataInitializationLog.start(
+                            LOG,
+                            "filesystem-manifest-prefetch",
+                            snapshotManager.tablePath() + ",snapshot=" + snapshot.id())) {
+                LOG.info(
+                        "FileSystemWriteRestore started prefetching manifestEntries for table {}, snapshot {}",
+                        snapshotManager.tablePath(),
+                        snapshot.id());
+                List<ManifestEntry> manifestEntries = fetchManifestEntries(snapshot, null, null);
+                LOG.info(
+                        "FileSystemWriteRestore prefetched manifestEntries for table {}, snapshot {}: {} entries",
+                        snapshotManager.tablePath(),
+                        snapshot.id(),
+                        manifestEntries.size());
 
-            RowType partitionType = scan.manifestsReader().partitionType();
-            TableSchema tableSchema = getTableSchema(snapshot);
+                RowType partitionType = scan.manifestsReader().partitionType();
+                TableSchema tableSchema = getTableSchema(snapshot);
 
-            PrefetchedManifestEntries prefetchedManifestEntries =
-                    new PrefetchedManifestEntries(
-                            snapshot, partitionType, manifestEntries, tableSchema);
+                PrefetchedManifestEntries prefetchedManifestEntries =
+                        new PrefetchedManifestEntries(
+                                snapshot, partitionType, manifestEntries, tableSchema);
 
-            prefetchedManifestEntriesCache.put(
-                    getPrefetchManifestEntriesCacheKey(), prefetchedManifestEntries);
-            return prefetchedManifestEntries;
+                prefetchedManifestEntriesCache.put(
+                        getPrefetchManifestEntriesCacheKey(), prefetchedManifestEntries);
+                initialization.complete(manifestEntries.size(), -1);
+                return prefetchedManifestEntries;
+            }
         }
     }
 

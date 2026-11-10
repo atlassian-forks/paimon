@@ -595,10 +595,14 @@ public class FlinkConnectorOptions {
                     .booleanType()
                     .defaultValue(false)
                     .withDescription(
-                            "If true, spill serialized writer coordinator scan responses to local "
-                                    + "disk on both the JobManager and TaskManagers. This avoids "
-                                    + "retaining the complete outer serialized response in heap while "
-                                    + "preserving the existing paged RPC wire format.");
+                            "If true, spill writer coordinator scan responses to local disk on both "
+                                    + "the JobManager and TaskManagers. Streaming-capable peers write "
+                                    + "and decode file metadata one record at a time, avoiding complete "
+                                    + "scan-result and serialized-file lists on the JobManager and "
+                                    + "serialized-file lists on TaskManagers. Paging is unchanged; "
+                                    + "legacy peers retain the Java-serialized response format. "
+                                    + "Manifest read batches, deletion identifiers, the manifest cache "
+                                    + "and restored TaskManager metadata still consume heap.");
 
     public static final ConfigOption<String> SINK_WRITER_COORDINATOR_SPILL_DIRECTORY =
             key("sink.writer-coordinator.spill-directory")

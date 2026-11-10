@@ -23,6 +23,7 @@ import org.apache.paimon.utils.InstantiationUtil;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.file.Path;
 import java.util.Arrays;
 
@@ -47,9 +48,23 @@ final class SerializedScanResponse implements AutoCloseable {
 
     static SerializedScanResponse spilled(
             Object response, int bufferSize, @Nullable Path spillDirectory) throws IOException {
+        return spilled(
+                output -> InstantiationUtil.serializeObject(output, response),
+                bufferSize,
+                spillDirectory);
+    }
+
+    interface SpillWriter {
+        void write(OutputStream output) throws IOException;
+    }
+
+    static SerializedScanResponse spilled(
+            SpillWriter writer, int bufferSize, @Nullable Path spillDirectory) throws IOException {
         WriterCoordinatorSpillFile spillFile = WriterCoordinatorSpillFile.create(spillDirectory);
         try {
-            spillFile.writeObject(response, bufferSize);
+            try (OutputStream output = spillFile.outputStream(bufferSize)) {
+                writer.write(output);
+            }
             long length = spillFile.size();
             if (length > Integer.MAX_VALUE) {
                 throw new IOException(

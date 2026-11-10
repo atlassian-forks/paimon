@@ -39,6 +39,7 @@ import org.apache.paimon.utils.Pair;
 import org.apache.paimon.utils.SegmentsCache;
 
 import org.junit.jupiter.api.Test;
+import org.openjdk.jol.info.GraphLayout;
 
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
@@ -60,11 +61,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** Manual benchmark for comparing in-memory and disk-spilled coordinator responses. */
 class TableWriteCoordinatorSpillMemoryBenchmark extends TableTestBase {
 
+    // Keep the measured object graph live across explicit benchmark GC; never used in production.
+    private static volatile Object retainedEntryGraph;
+
     private static final String PROPERTY_PREFIX = "paimon.coordinator.spill.memory.";
 
     @Test
     void coldScan() throws Exception {
         boolean spillEnabled = booleanProperty("spill-enabled", false);
+        boolean streamingResponse = booleanProperty("streaming-response", false);
         int syntheticManifestMb = intProperty("synthetic-manifest-mb", 100);
         int syntheticEntryBytes = intProperty("synthetic-entry-bytes", 512);
         int manifestParallelism = intProperty("manifest-parallelism", 4);
@@ -89,7 +94,8 @@ class TableWriteCoordinatorSpillMemoryBenchmark extends TableTestBase {
         long startNanos = System.nanoTime();
         PagedCoordinationResponse firstPage =
                 coordinator.scan(
-                        new PagedCoordinationRequest(requestContent, "benchmark-request", null));
+                        new PagedCoordinationRequest(
+                                requestContent, "benchmark-request", null, streamingResponse));
         long elapsedMillis = (System.nanoTime() - startNanos) / 1_000_000L;
         long peakHeap = poolPeakUsed();
         long heapAfterRequest = currentHeap();
@@ -109,12 +115,13 @@ class TableWriteCoordinatorSpillMemoryBenchmark extends TableTestBase {
         long spillFilesAfterClear = directoryBytes(spillDirectory);
 
         System.out.printf(
-                "SPILL_MEMORY_RESULT spillEnabled=%s manifestBytes=%,d manifestFiles=%d "
+                "SPILL_MEMORY_RESULT spillEnabled=%s streamingResponse=%s manifestBytes=%,d manifestFiles=%d "
                         + "responseBytes=%,d responseHeapCacheBytes=%,d responseSpillBytes=%,d "
                         + "spillFilesBytes=%,d manifestCacheBytes=%,d elapsedMillis=%,d "
                         + "baselineHeap=%,d peakHeap=%,d heapAfterRequest=%,d "
                         + "heapAfterRequestGc=%,d heapAfterClearGc=%,d spillFilesAfterClear=%,d%n",
                 spillEnabled,
+                streamingResponse,
                 manifestBytes,
                 manifestFiles,
                 responseBytes,
@@ -134,6 +141,52 @@ class TableWriteCoordinatorSpillMemoryBenchmark extends TableTestBase {
         assertThat(responseBytes).isPositive();
         assertThat(responseSpillBytes > 0).isEqualTo(spillEnabled);
         assertThat(spillFilesAfterClear).isZero();
+    }
+
+    /** Isolated object-graph probe, separate from scan/serialization peak measurements. */
+    @Test
+    void manifestEntryFootprint() throws Exception {
+        int syntheticManifestMb = intProperty("synthetic-manifest-mb", 100);
+        int syntheticEntryBytes = intProperty("synthetic-entry-bytes", 512);
+        FileStoreTable table = createTable(false, tempPath.resolve("footprint-spill"), 4);
+        write(table, GenericRow.of(1));
+        replaceWithSyntheticManifest(table, syntheticManifestMb, syntheticEntryBytes);
+        resetManifestCache(table);
+        forceGc();
+        long baselineHeap = currentHeap();
+        long started = System.nanoTime();
+        List<ManifestEntry> entries =
+                table.store()
+                        .newScan()
+                        .withSnapshot(table.latestSnapshot().get())
+                        .withPartitionBucket(EMPTY_ROW, 0)
+                        .plan()
+                        .files();
+        long scanMillis = (System.nanoTime() - started) / 1_000_000L;
+        retainedEntryGraph = entries;
+        try {
+            // Measure post-GC heap before JOL traversal creates its own temporary bookkeeping.
+            forceGc();
+            long heapWithEntries = currentHeap();
+            long entryGraphBytes = GraphLayout.parseInstance(entries).totalSize();
+            System.out.printf(
+                    "MANIFEST_ENTRY_FOOTPRINT entries=%d manifestBytes=%,d "
+                            + "entryGraphBytes=%,d entryGraphBytesPerEntry=%.2f "
+                            + "baselineHeap=%,d heapWithEntriesAfterGc=%,d "
+                            + "heapDeltaAfterGc=%,d scanMillis=%d%n",
+                    entries.size(),
+                    currentSnapshotManifestBytes(table),
+                    entryGraphBytes,
+                    (double) entryGraphBytes / entries.size(),
+                    baselineHeap,
+                    heapWithEntries,
+                    heapWithEntries - baselineHeap,
+                    scanMillis);
+            assertThat(entries).isNotEmpty();
+            assertThat(entryGraphBytes).isGreaterThan(entries.size());
+        } finally {
+            retainedEntryGraph = null;
+        }
     }
 
     private FileStoreTable createTable(

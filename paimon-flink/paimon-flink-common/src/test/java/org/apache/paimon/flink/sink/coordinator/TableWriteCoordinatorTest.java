@@ -47,8 +47,12 @@ import org.apache.flink.runtime.operators.coordination.CoordinationResponse;
 import org.apache.flink.util.SerializedValue;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
@@ -65,6 +69,144 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class TableWriteCoordinatorTest extends TableTestBase {
+
+    @ParameterizedTest
+    @CsvSource({"true,true", "true,false", "false,true", "false,false"})
+    void testStreamingAndLegacyPeerCombinations(boolean jmSpill, boolean tmSpill) throws Exception {
+        java.nio.file.Path directory = tempPath.resolve("peer-combinations");
+        java.nio.file.Files.createDirectories(directory);
+        TableWriteCoordinator coordinator =
+                createPagedCoordinator("1 mb", jmSpill, directory.toString());
+        TaskOperatorEventGateway gateway = mock(TaskOperatorEventGateway.class);
+        when(gateway.sendRequestToCoordinator(any(), any()))
+                .thenAnswer(
+                        invocation -> {
+                            SerializedValue<CoordinationRequest> value = invocation.getArgument(1);
+                            PagedCoordinationRequest request =
+                                    (PagedCoordinationRequest)
+                                            value.deserializeValue(getClass().getClassLoader());
+                            assertThat(request.streamingResponse()).isEqualTo(tmSpill);
+                            PagedCoordinationResponse page = coordinator.scan(request);
+                            if (request.pageToken() == null) {
+                                assertThat(
+                                                ByteBuffer.wrap(page.content()).getInt()
+                                                        == StreamingScanResponse.MAGIC)
+                                        .isEqualTo(jmSpill && tmSpill);
+                            }
+                            return CompletableFuture.completedFuture(
+                                    CoordinationResponseUtils.wrap(page));
+                        });
+        RestoreFiles restored =
+                new CoordinatedWriteRestore(gateway, new OperatorID(), tmSpill, 64, directory)
+                        .restoreFiles(EMPTY_ROW, 0, false, false);
+        assertThat(restored.dataFiles()).hasSize(1);
+        assertThat(restored.totalBuckets()).isNotNull();
+        assertThat(coordinator.pagedCoordinationEntries()).isZero();
+        assertThat(fileCount(directory)).isZero();
+    }
+
+    @Test
+    void testNewTaskManagerAcceptsLegacyJobManagerResponse() throws Exception {
+        java.nio.file.Path directory = tempPath.resolve("legacy-jobmanager");
+        TableWriteCoordinator coordinator =
+                createPagedCoordinator("1 mb", true, directory.toString());
+        TaskOperatorEventGateway gateway = mock(TaskOperatorEventGateway.class);
+        when(gateway.sendRequestToCoordinator(any(), any()))
+                .thenAnswer(
+                        invocation -> {
+                            SerializedValue<CoordinationRequest> value = invocation.getArgument(1);
+                            PagedCoordinationRequest request =
+                                    (PagedCoordinationRequest)
+                                            value.deserializeValue(getClass().getClassLoader());
+                            // Simulate a pre-streaming JM, which ignores the new capability field.
+                            PagedCoordinationResponse page =
+                                    coordinator.scan(
+                                            new PagedCoordinationRequest(
+                                                    request.content(),
+                                                    request.requestId(),
+                                                    request.pageToken()));
+                            return CompletableFuture.completedFuture(
+                                    CoordinationResponseUtils.wrap(page));
+                        });
+        RestoreFiles restored =
+                new CoordinatedWriteRestore(gateway, new OperatorID(), true, 64, directory)
+                        .restoreFiles(EMPTY_ROW, 0, false, false);
+        assertThat(restored.dataFiles()).hasSize(1);
+        assertThat(fileCount(directory)).isZero();
+    }
+
+    @Test
+    void testStreamingEvictionRebuildsAgainstPinnedSnapshot() throws Exception {
+        java.nio.file.Path directory = tempPath.resolve("streaming-eviction");
+        TableWriteCoordinator coordinator =
+                createPagedCoordinator("1 bytes", true, directory.toString());
+        byte[] content = serializeObject(scanRequest());
+        PagedCoordinationResponse page =
+                coordinator.scan(new PagedCoordinationRequest(content, "pinned", null, true));
+        FileStoreTable table = getTable(new Identifier("db", "paged_1_bytes_true"));
+        long pinnedId = table.latestSnapshot().get().id();
+        write(table, GenericRow.of(2));
+        coordinator.checkpoint();
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        while (true) {
+            bytes.write(page.content());
+            if (page.nextPageToken() == null) {
+                break;
+            }
+            page =
+                    coordinator.scan(
+                            new PagedCoordinationRequest(
+                                    content, "pinned", page.nextPageToken(), true));
+        }
+        RestoreFiles restored =
+                StreamingScanResponse.read(
+                        new ByteArrayInputStream(bytes.toByteArray()), bytes.size());
+        assertThat(restored.snapshot().id()).isEqualTo(pinnedId);
+        assertThat(restored.dataFiles()).hasSize(1);
+        assertThat(coordinator.pagedCoordinationRecomputations()).isPositive();
+        assertThat(fileCount(directory)).isZero();
+    }
+
+    @Test
+    void testStreamingFormatIsPartOfResponseCacheKey() throws Exception {
+        java.nio.file.Path directory = tempPath.resolve("streaming-cache-key");
+        TableWriteCoordinator coordinator =
+                createPagedCoordinator("1 mb", true, directory.toString());
+        byte[] content = serializeObject(scanRequest());
+        PagedCoordinationRequest legacy = new PagedCoordinationRequest(content, "same-key", null);
+        PagedCoordinationRequest streaming =
+                new PagedCoordinationRequest(content, "same-key", null, true);
+        assertThat(ByteBuffer.wrap(coordinator.scan(legacy).content()).getInt())
+                .isNotEqualTo(StreamingScanResponse.MAGIC);
+        assertThat(ByteBuffer.wrap(coordinator.scan(streaming).content()).getInt())
+                .isEqualTo(StreamingScanResponse.MAGIC);
+        assertThat(coordinator.pagedCoordinationEntries()).isEqualTo(2);
+        coordinator.invalidatePagedCoordination(streaming);
+        assertThat(coordinator.pagedCoordinationEntries()).isEqualTo(1);
+        coordinator.clearPagedCoordination();
+        assertThat(fileCount(directory)).isZero();
+    }
+
+    @Test
+    void testStreamingDecodeFailureDeletesTaskManagerSpill() throws Exception {
+        java.nio.file.Path directory =
+                java.nio.file.Files.createDirectory(tempPath.resolve("bad-stream"));
+        byte[] corrupt =
+                ByteBuffer.allocate(8).putInt(StreamingScanResponse.MAGIC).putInt(999).array();
+        TaskOperatorEventGateway gateway = mock(TaskOperatorEventGateway.class);
+        when(gateway.sendRequestToCoordinator(any(), any()))
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                CoordinationResponseUtils.wrap(
+                                        new PagedCoordinationResponse(corrupt, null))));
+        CoordinatedWriteRestore restore =
+                new CoordinatedWriteRestore(gateway, new OperatorID(), true, 1, directory);
+        assertThatThrownBy(() -> restore.restoreFiles(EMPTY_ROW, 0, false, false))
+                .isInstanceOf(RuntimeException.class)
+                .hasRootCauseMessage(
+                        "Unsupported streaming writer coordinator response version: 999");
+        assertThat(fileCount(directory)).isZero();
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
@@ -435,6 +577,9 @@ class TableWriteCoordinatorTest extends TableTestBase {
                         .partitionKeys("pt")
                         .option(CoreOptions.BUCKET.key(), String.valueOf(tableBuckets))
                         .option(
+                                FlinkConnectorOptions.SINK_WRITER_COORDINATOR_SPILL_ENABLED.key(),
+                                "true")
+                        .option(
                                 FlinkConnectorOptions.SINK_WRITER_COORDINATOR_PREFETCH_MANIFESTS
                                         .key(),
                                 String.valueOf(prefetch))
@@ -496,6 +641,22 @@ class TableWriteCoordinatorTest extends TableTestBase {
         assertThat(newPartition.totalBuckets()).isEqualTo(tableBuckets);
         assertThat(newPartition.extractDataFiles()).isEmpty();
 
+        assertThat(streamingRestore(coordinator, requestBucket0).totalBuckets())
+                .isEqualTo(partitionBuckets);
+        assertThat(streamingRestore(coordinator, requestBucket1).totalBuckets())
+                .isEqualTo(partitionBuckets);
+        assertThat(streamingRestore(coordinator, requestBucket1).dataFiles()).isEmpty();
+        assertThat(
+                        streamingRestore(
+                                        coordinator,
+                                        new ScanCoordinationRequest(
+                                                serializeBinaryRow(partitionRow(2)),
+                                                1,
+                                                false,
+                                                false))
+                                .totalBuckets())
+                .isEqualTo(tableBuckets);
+
         // A checkpoint must invalidate the cached layout after a partition overwrite.
         try (StreamTableWrite write = writeBuilder.newWrite()) {
             write.write(GenericRow.of(1, 2, 200), 0);
@@ -514,6 +675,28 @@ class TableWriteCoordinatorTest extends TableTestBase {
         }
         coordinator.checkpoint();
         assertThat(coordinator.scan(requestBucket1).totalBuckets()).isEqualTo(4);
+        assertThat(streamingRestore(coordinator, requestBucket1).totalBuckets()).isEqualTo(4);
+        // The iterator must apply manifest DELETE records from the overwrite, not restore old
+        // files.
+        assertThat(streamingRestore(coordinator, requestBucket0).dataFiles())
+                .containsExactlyInAnyOrderElementsOf(
+                        coordinator.scan(requestBucket0).extractDataFiles());
+    }
+
+    private RestoreFiles streamingRestore(
+            TableWriteCoordinator coordinator, ScanCoordinationRequest request) throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        byte[] content = serializeObject(request);
+        String id = UUID.randomUUID().toString();
+        Integer token = null;
+        do {
+            PagedCoordinationResponse page =
+                    coordinator.scan(new PagedCoordinationRequest(content, id, token, true));
+            bytes.write(page.content());
+            token = page.nextPageToken();
+        } while (token != null);
+        return StreamingScanResponse.read(
+                new ByteArrayInputStream(bytes.toByteArray()), bytes.size());
     }
 
     private BinaryRow partitionRow(int partitionValue) {
