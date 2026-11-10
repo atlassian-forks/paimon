@@ -130,6 +130,14 @@ public interface FileStoreScan {
      */
     List<SimpleFileEntry> readSimpleEntries();
 
+    /**
+     * Read live simple entries in bounded manifest batches, without collecting the full snapshot.
+     * Implementations may fall back to the list API if they do not support incremental scanning.
+     */
+    default Iterator<SimpleFileEntry> readSimpleEntryIterator() {
+        return readSimpleEntries().iterator();
+    }
+
     List<PartitionEntry> readPartitionEntries();
 
     List<BucketEntry> readBucketEntries();

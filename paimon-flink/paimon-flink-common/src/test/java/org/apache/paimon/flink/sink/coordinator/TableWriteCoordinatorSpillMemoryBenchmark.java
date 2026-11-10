@@ -21,6 +21,7 @@ package org.apache.paimon.flink.sink.coordinator;
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.flink.FlinkConnectorOptions;
 import org.apache.paimon.fs.Path;
@@ -30,10 +31,12 @@ import org.apache.paimon.manifest.ManifestEntry;
 import org.apache.paimon.manifest.ManifestFile;
 import org.apache.paimon.manifest.ManifestFileMeta;
 import org.apache.paimon.manifest.ManifestList;
+import org.apache.paimon.options.Options;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.stats.SimpleStats;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.TableTestBase;
+import org.apache.paimon.table.sink.PartitionBucketMapping;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.utils.Pair;
 import org.apache.paimon.utils.SegmentsCache;
@@ -189,6 +192,70 @@ class TableWriteCoordinatorSpillMemoryBenchmark extends TableTestBase {
         }
     }
 
+    /** Compare the same partitioned snapshot in separate JVMs using incremental-mapping. */
+    @Test
+    void mappingInitialization() throws Exception {
+        boolean incremental = booleanProperty("incremental-mapping", true);
+        int manifestMb = intProperty("synthetic-manifest-mb", 100);
+        int entryBytes = intProperty("synthetic-entry-bytes", 512);
+        Identifier identifier = new Identifier(database, "mapping_memory");
+        catalog.createTable(
+                identifier,
+                Schema.newBuilder()
+                        .column("k", DataTypes.INT())
+                        .column("pt", DataTypes.INT())
+                        .partitionKeys("pt")
+                        .option(CoreOptions.BUCKET.key(), "1")
+                        .option(CoreOptions.BUCKET_KEY.key(), "k")
+                        .option(CoreOptions.WRITE_ONLY.key(), "true")
+                        .option(CoreOptions.MANIFEST_TARGET_FILE_SIZE.key(), "512 kb")
+                        .option(CoreOptions.SCAN_MANIFEST_PARALLELISM.key(), "4")
+                        .option(CoreOptions.PARTITION_BUCKET_MAPPING_CACHE_ENABLED.key(), "false")
+                        .build(),
+                false);
+        FileStoreTable table = getTable(identifier);
+        write(table, GenericRow.of(1, 0));
+        replaceWithSyntheticManifest(table, manifestMb, entryBytes);
+        Options rescaledOptions = new Options(table.options());
+        rescaledOptions.set(CoreOptions.BUCKET, 32);
+        table = table.copy(table.schema().copy(rescaledOptions.toMap()));
+        resetManifestCache(table);
+        forceGc();
+        long baselineHeap = currentHeap();
+        resetPoolPeaks();
+        long start = System.nanoTime();
+        PartitionBucketMapping mapping =
+                incremental
+                        ? PartitionBucketMapping.loadFromTable(table)
+                        : PartitionBucketMapping.loadFromEntries(
+                                table.store().newScan().readSimpleEntries(), table.schema());
+        long elapsedMillis = (System.nanoTime() - start) / 1_000_000L;
+        long peakHeap = poolPeakUsed();
+        long heapAfterInit = currentHeap();
+        retainedEntryGraph = mapping;
+        try {
+            for (int i = 0; i < 1024; i++) {
+                assertThat(mapping.resolveNumBuckets(BinaryRow.singleColumn(i))).isEqualTo(1);
+            }
+            assertThat(mapping.resolveNumBuckets(BinaryRow.singleColumn(9999))).isEqualTo(32);
+            forceGc();
+            System.out.printf(
+                    "MAPPING_MEMORY_RESULT incremental=%s entries=%d manifestBytes=%d "
+                            + "baselineHeap=%d peakHeap=%d heapAfterInit=%d heapAfterGc=%d "
+                            + "elapsedMillis=%d%n",
+                    incremental,
+                    (manifestMb * 1024L * 1024L + entryBytes - 1) / entryBytes,
+                    currentSnapshotManifestBytes(table),
+                    baselineHeap,
+                    peakHeap,
+                    heapAfterInit,
+                    currentHeap(),
+                    elapsedMillis);
+        } finally {
+            retainedEntryGraph = null;
+        }
+    }
+
     private FileStoreTable createTable(
             boolean spillEnabled, java.nio.file.Path spillDirectory, int manifestParallelism)
             throws Exception {
@@ -250,7 +317,15 @@ class TableWriteCoordinatorSpillMemoryBenchmark extends TableTestBase {
                             null,
                             null,
                             null);
-            entries.add(ManifestEntry.create(FileKind.ADD, EMPTY_ROW, 0, 1, file));
+            entries.add(
+                    ManifestEntry.create(
+                            FileKind.ADD,
+                            table.partitionKeys().isEmpty()
+                                    ? EMPTY_ROW
+                                    : BinaryRow.singleColumn(i % 1024),
+                            0,
+                            1,
+                            file));
         }
 
         ManifestFile manifestFile = table.store().manifestFileFactory().create();

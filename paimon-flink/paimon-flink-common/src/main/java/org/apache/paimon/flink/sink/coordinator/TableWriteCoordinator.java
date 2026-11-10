@@ -54,6 +54,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.apache.paimon.deletionvectors.DeletionVectorsIndexFile.DELETION_VECTORS_INDEX;
@@ -193,6 +194,7 @@ public class TableWriteCoordinator {
 
     public synchronized PagedCoordinationResponse scan(PagedCoordinationRequest request)
             throws IOException {
+        long startedNanos = System.nanoTime();
         Integer pageToken = request.pageToken();
         CoordinationKey requestKey = new CoordinationKey(request);
         SerializedScanResponse full;
@@ -221,6 +223,8 @@ public class TableWriteCoordinator {
             newlySerialized = true;
         }
 
+        long preparedNanos = System.nanoTime();
+        long responseLength = full.length();
         int offset = pageToken == null ? 0 : pageToken;
         if (offset < 0 || offset >= full.length()) {
             if (newlySerialized) {
@@ -243,6 +247,7 @@ public class TableWriteCoordinator {
             }
             throw e;
         }
+        long pageReadNanos = System.nanoTime();
         int len = content.length;
         Integer nextPageToken = offset + len;
         if (nextPageToken >= full.length()) {
@@ -271,6 +276,31 @@ public class TableWriteCoordinator {
                 }
             } else {
                 full.close();
+            }
+        }
+        long totalMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
+        String source = pageToken == null ? "initial" : newlySerialized ? "rebuilt" : "cache";
+        String format =
+                "Writer coordinator page served: table={}, requestId={}, pageToken={}, "
+                        + "source={}, prepareResponseMs={}, readPageMs={}, pageHandlingMs={}, "
+                        + "fullResponseBytes={}, pageBytes={}, nextPageToken={}";
+        if (newlySerialized || totalMs >= 1_000 || LOG.isDebugEnabled()) {
+            Object[] arguments = {
+                table.name(),
+                request.requestId(),
+                pageToken,
+                source,
+                TimeUnit.NANOSECONDS.toMillis(preparedNanos - startedNanos),
+                TimeUnit.NANOSECONDS.toMillis(pageReadNanos - preparedNanos),
+                totalMs,
+                responseLength,
+                len,
+                nextPageToken
+            };
+            if (newlySerialized || totalMs >= 1_000) {
+                LOG.info(format, arguments);
+            } else {
+                LOG.debug(format, arguments);
             }
         }
         return new PagedCoordinationResponse(content, nextPageToken);
