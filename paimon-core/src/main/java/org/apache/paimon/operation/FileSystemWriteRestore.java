@@ -30,6 +30,7 @@ import org.apache.paimon.partition.PartitionPredicate;
 import org.apache.paimon.schema.TableSchema;
 import org.apache.paimon.table.sink.PartitionBucketMapping;
 import org.apache.paimon.types.RowType;
+import org.apache.paimon.utils.MemoryDiagnostics;
 import org.apache.paimon.utils.MetadataInitializationLog;
 import org.apache.paimon.utils.SnapshotManager;
 
@@ -45,6 +46,9 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import static org.apache.paimon.deletionvectors.DeletionVectorsIndexFile.DELETION_VECTORS_INDEX;
@@ -53,6 +57,9 @@ import static org.apache.paimon.deletionvectors.DeletionVectorsIndexFile.DELETIO
 public class FileSystemWriteRestore implements WriteRestore {
 
     private static final Logger LOG = LoggerFactory.getLogger(FileSystemWriteRestore.class);
+    private static final Logger MEMORY_LOG = LoggerFactory.getLogger(MemoryDiagnostics.class);
+
+    private static final AtomicLong LAST_CACHE_LOG_NANOS = new AtomicLong();
 
     private final SnapshotManager snapshotManager;
     private final FileStoreScan scan;
@@ -95,6 +102,45 @@ public class FileSystemWriteRestore implements WriteRestore {
             // measuring memory size
             //    of a ManifestEntry object
         }
+    }
+
+    /** Count cached objects without walking their object graphs; safe across writer threads. */
+    public static void logCacheStats() {
+        Cache<String, PrefetchedManifestEntries> cache = prefetchedManifestEntriesCache;
+        if (cache == null || !MEMORY_LOG.isInfoEnabled()) {
+            return;
+        }
+        long now = System.nanoTime();
+        long previous = LAST_CACHE_LOG_NANOS.get();
+        if ((previous != 0 && now - previous < TimeUnit.MINUTES.toNanos(1))
+                || !LAST_CACHE_LOG_NANOS.compareAndSet(previous, now)) {
+            return;
+        }
+        long tables = 0;
+        long entries = 0;
+        long overrides = 0;
+        for (Map.Entry<String, PrefetchedManifestEntries> entry : cache.asMap().entrySet()) {
+            PrefetchedManifestEntries value = entry.getValue();
+            long entryCount = value.manifestEntries.size();
+            int overrideCount = value.partitionBucketMapping.partitionOverrideCount();
+            tables++;
+            entries += entryCount;
+            overrides += overrideCount;
+            MEMORY_LOG.info(
+                    "Manifest prefetch cache table: table={}, snapshot={}, manifestEntries={}, "
+                            + "partitionOverrides={}, retainedHeapBytes=-1",
+                    entry.getKey(),
+                    value.snapshot.id(),
+                    entryCount,
+                    overrideCount);
+        }
+        // -1 explicitly means unmeasured: entry counts are not a retained-heap measurement.
+        MEMORY_LOG.info(
+                "Manifest prefetch cache summary: cachedTables={}, manifestEntries={}, "
+                        + "partitionOverrides={}, retainedHeapBytes=-1",
+                tables,
+                entries,
+                overrides);
     }
 
     @Override
@@ -174,6 +220,7 @@ public class FileSystemWriteRestore implements WriteRestore {
 
                 prefetchedManifestEntriesCache.put(
                         getPrefetchManifestEntriesCacheKey(), prefetchedManifestEntries);
+                logCacheStats();
                 initialization.complete(manifestEntries.size(), -1);
                 return prefetchedManifestEntries;
             }

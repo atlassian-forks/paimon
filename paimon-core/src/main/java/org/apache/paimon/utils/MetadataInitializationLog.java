@@ -36,6 +36,7 @@ public final class MetadataInitializationLog implements AutoCloseable {
     private final long startNanos;
     private final long heapUsedBefore;
     private boolean success;
+    private boolean closed;
     private long entryCount = -1;
     private long serializedBytes = -1;
 
@@ -45,11 +46,14 @@ public final class MetadataInitializationLog implements AutoCloseable {
         this.context = context;
         this.startNanos = System.nanoTime();
         this.heapUsedBefore = usedHeapBytes();
+        int active = MemoryDiagnostics.metadataStarted(operation);
         logger.info(
-                "Metadata initialization started: operation={}, context={}, jvmHeapUsedBeforeBytes={}",
+                "Metadata initialization started: operation={}, context={}, jvmHeapUsedBeforeBytes={}, activeMetadataOperations={}",
                 operation,
                 context,
-                heapUsedBefore);
+                heapUsedBefore,
+                active);
+        MemoryDiagnostics.logJvmMemory(operation + "," + context);
     }
 
     public static MetadataInitializationLog start(Logger logger, String operation, String context) {
@@ -65,6 +69,11 @@ public final class MetadataInitializationLog implements AutoCloseable {
 
     @Override
     public void close() {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        int active = MemoryDiagnostics.metadataFinished(operation);
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
         long heapUsedAfter = usedHeapBytes();
         Runtime runtime = Runtime.getRuntime();
@@ -72,7 +81,7 @@ public final class MetadataInitializationLog implements AutoCloseable {
                 "Metadata initialization finished: operation={}, context={}, success={}, "
                         + "durationMs={}, entryCount={}, serializedBytes={}, "
                         + "jvmHeapUsedBeforeBytes={}, jvmHeapUsedAfterBytes={}, "
-                        + "jvmHeapUsedDeltaBytes={}, jvmHeapCommittedBytes={}, jvmHeapMaxBytes={}",
+                        + "jvmHeapUsedDeltaBytes={}, jvmHeapCommittedBytes={}, jvmHeapMaxBytes={}, activeMetadataOperations={}",
                 operation,
                 context,
                 success,
@@ -83,7 +92,9 @@ public final class MetadataInitializationLog implements AutoCloseable {
                 heapUsedAfter,
                 heapUsedAfter - heapUsedBefore,
                 runtime.totalMemory(),
-                runtime.maxMemory());
+                runtime.maxMemory(),
+                active);
+        MemoryDiagnostics.logJvmMemory(operation + "," + context);
     }
 
     private static long usedHeapBytes() {

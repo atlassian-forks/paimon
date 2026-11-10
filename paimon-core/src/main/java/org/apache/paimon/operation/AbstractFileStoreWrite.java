@@ -39,6 +39,7 @@ import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.CommitIncrement;
 import org.apache.paimon.utils.ExecutorThreadFactory;
+import org.apache.paimon.utils.MemoryDiagnostics;
 import org.apache.paimon.utils.RecordWriter;
 import org.apache.paimon.utils.SnapshotManager;
 
@@ -55,6 +56,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 import static org.apache.paimon.CoreOptions.PARTITION_DEFAULT_NAME;
@@ -70,6 +72,7 @@ import static org.apache.paimon.utils.FileStorePathFactory.getPartitionComputer;
 public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
 
     private static final Logger LOG = LoggerFactory.getLogger(AbstractFileStoreWrite.class);
+    private static final Logger MEMORY_LOG = LoggerFactory.getLogger(MemoryDiagnostics.class);
 
     private final int writerNumberMax;
     @Nullable private final DynamicBucketIndexMaintainer.Factory dbMaintainerFactory;
@@ -90,6 +93,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     protected CompactionMetrics compactionMetrics = null;
     protected final String tableName;
     private final boolean legacyPartitionName;
+    private long lastMemoryLogNanos;
 
     protected AbstractFileStoreWrite(
             SnapshotManager snapshotManager,
@@ -192,6 +196,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     @Override
     public List<CommitMessage> prepareCommit(boolean waitCompaction, long commitIdentifier)
             throws Exception {
+        logMemoryObservation("prepare-commit");
         Function<WriterContainer<T>, Boolean> writerCleanChecker;
         if (writers.values().stream()
                         .map(Map::values)
@@ -324,6 +329,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
 
     @Override
     public void close() throws Exception {
+        logMemoryObservation("close");
         for (Map<Integer, WriterContainer<T>> bucketWriters : writers.values()) {
             for (WriterContainer<T> writerContainer : bucketWriters.values()) {
                 writerContainer.writer.close();
@@ -518,6 +524,35 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                         rowCount(restoreFiles));
         logWriterInitialized(partition, bucket, writerContainer, ignorePreviousFiles);
         return writerContainer;
+    }
+
+    private void logMemoryObservation(String phase) {
+        long now = System.nanoTime();
+        if (lastMemoryLogNanos != 0 && now - lastMemoryLogNanos < TimeUnit.MINUTES.toNanos(1)) {
+            return;
+        }
+        lastMemoryLogNanos = now;
+        if (MEMORY_LOG.isInfoEnabled()) {
+            long restoredFilesAtCreation = 0;
+            for (Map<Integer, WriterContainer<T>> bucketWriters : writers.values()) {
+                for (WriterContainer<T> writer : bucketWriters.values()) {
+                    restoredFilesAtCreation += writer.restoredFileCount;
+                }
+            }
+            // Runs on the writer thread: do not inspect the mutable writer maps from a sampler.
+            MEMORY_LOG.info(
+                    "Writer memory observation: table={}, writeInstance={}, phase={}, "
+                            + "activePartitions={}, activeBucketWriters={}, "
+                            + "initialRestoredFilesForActiveWriters={}",
+                    tableName,
+                    System.identityHashCode(this),
+                    phase,
+                    writers.size(),
+                    writerNumber(),
+                    restoredFilesAtCreation);
+        }
+        FileSystemWriteRestore.logCacheStats();
+        MemoryDiagnostics.logJvmMemory("writer," + tableName + "," + phase);
     }
 
     private long writerNumber() {

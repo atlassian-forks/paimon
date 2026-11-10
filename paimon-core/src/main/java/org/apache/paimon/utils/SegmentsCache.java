@@ -32,6 +32,8 @@ import org.slf4j.LoggerFactory;
 import javax.annotation.Nullable;
 
 import java.time.Duration;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.apache.paimon.CoreOptions.PAGE_SIZE;
 
@@ -39,6 +41,7 @@ import static org.apache.paimon.CoreOptions.PAGE_SIZE;
 public class SegmentsCache<T> {
 
     private static final Logger LOG = LoggerFactory.getLogger(SegmentsCache.class);
+    private static final Logger MEMORY_LOG = LoggerFactory.getLogger(MemoryDiagnostics.class);
 
     private static final int OBJECT_MEMORY_SIZE = 1000;
 
@@ -49,6 +52,8 @@ public class SegmentsCache<T> {
      * many segments.
      */
     private static final long PER_SEGMENT_OVERHEAD = 64;
+
+    private final AtomicLong lastStatsNanos = new AtomicLong();
 
     private final int pageSize;
     private final Cache<T, Segments> cache;
@@ -120,6 +125,28 @@ public class SegmentsCache<T> {
 
     public void put(T key, Segments segments) {
         cache.put(key, segments);
+        logStats(key);
+    }
+
+    private void logStats(T key) {
+        if (!MEMORY_LOG.isInfoEnabled()) {
+            return;
+        }
+        long now = System.nanoTime();
+        long previous = lastStatsNanos.get();
+        if ((previous != 0 && now - previous < TimeUnit.MINUTES.toNanos(1))
+                || !lastStatsNanos.compareAndSet(previous, now)) {
+            return;
+        }
+        MEMORY_LOG.info(
+                "Segments cache observation: cacheId={}, sampleKey={}, entries={}, "
+                        + "estimatedCacheWeightBytes={}, maxCacheWeightBytes={}, softValues={}",
+                System.identityHashCode(this),
+                key,
+                estimatedSize(),
+                totalCacheBytes(),
+                maxMemorySize.getBytes(),
+                softValues);
     }
 
     private int weigh(T cacheKey, Segments segments) {

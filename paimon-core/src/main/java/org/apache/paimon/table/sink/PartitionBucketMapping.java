@@ -233,6 +233,11 @@ public class PartitionBucketMapping implements Serializable {
         return defaultBucketCount;
     }
 
+    /** Number of stored overrides, not the number of files or the mapping's heap size. */
+    public int partitionOverrideCount() {
+        return partitionBucketMap.size();
+    }
+
     static class CacheKey {
         private final String tablePath;
         private final long latestSnapshotId;
