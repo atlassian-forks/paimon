@@ -81,7 +81,7 @@ public class TableWriteCoordinator {
     private final int spillBufferSize;
     @Nullable private final Path spillDirectory;
     private final Cache<CoordinationKey, SerializedScanResponse> pagedCoordination;
-    private final Cache<CoordinationKey, Snapshot> pagedCoordinationSnapshots;
+    private final Cache<CoordinationKey, Optional<Snapshot>> pagedCoordinationSnapshots;
     private final long pagedCoordinationMaxBytes;
     private final AtomicLong pagedCoordinationRecomputations = new AtomicLong();
 
@@ -199,16 +199,19 @@ public class TableWriteCoordinator {
         CoordinationKey requestKey = new CoordinationKey(request);
         SerializedScanResponse full;
         boolean newlySerialized = false;
+        Snapshot requestSnapshot = snapshot;
         if (pageToken != null) {
             full = pagedCoordination.getIfPresent(requestKey);
             if (full == null) {
-                Snapshot requestSnapshot = pagedCoordinationSnapshots.getIfPresent(requestKey);
-                if (requestSnapshot == null) {
+                Optional<Snapshot> pinnedSnapshot =
+                        pagedCoordinationSnapshots.getIfPresent(requestKey);
+                if (pinnedSnapshot == null) {
                     throw new IllegalStateException(
                             "Paged writer coordinator request expired before completion. "
                                     + "Increase sink.writer-coordinator.paged-cache-expire-after-access "
                                     + "or sink.writer-coordinator.paged-cache-memory.");
                 }
+                requestSnapshot = pinnedSnapshot.orElse(null);
                 pagedCoordinationRecomputations.incrementAndGet();
                 full =
                         serializeScanResponse(
@@ -216,7 +219,6 @@ public class TableWriteCoordinator {
                 newlySerialized = true;
             }
         } else {
-            Snapshot requestSnapshot = snapshot;
             full =
                     serializeScanResponse(
                             request.content(), requestSnapshot, request.streamingResponse());
@@ -257,25 +259,19 @@ public class TableWriteCoordinator {
                 full.close();
             }
         } else if (newlySerialized) {
-            Snapshot requestSnapshot =
-                    pageToken == null
-                            ? snapshot
-                            : pagedCoordinationSnapshots.getIfPresent(requestKey);
-            if (requestSnapshot != null) {
-                pagedCoordinationSnapshots.put(requestKey, requestSnapshot);
-                cachePagedResponse(requestKey, full);
-                if (pagedCoordinationMaxBytes >= 0
-                        && pagedCoordination.getIfPresent(requestKey) == null) {
-                    LOG.warn(
-                            "Writer coordinator response ({} bytes) exceeds or was evicted from "
-                                    + "the paged response cache ({} bytes). Later pages will be "
-                                    + "rebuilt against snapshot {}.",
-                            full.length(),
-                            pagedCoordinationMaxBytes,
-                            requestSnapshot.id());
-                }
-            } else {
-                full.close();
+            // An empty table has no snapshot yet, but its multi-page response still needs
+            // caching and a pinned state. Optional.empty differs from an expired request.
+            pagedCoordinationSnapshots.put(requestKey, Optional.ofNullable(requestSnapshot));
+            cachePagedResponse(requestKey, full);
+            if (pagedCoordinationMaxBytes >= 0
+                    && pagedCoordination.getIfPresent(requestKey) == null) {
+                LOG.warn(
+                        "Writer coordinator response ({} bytes) exceeds or was evicted from "
+                                + "the paged response cache ({} bytes). Later pages will be "
+                                + "rebuilt against snapshot {}.",
+                        full.length(),
+                        pagedCoordinationMaxBytes,
+                        requestSnapshot == null ? "none" : requestSnapshot.id());
             }
         }
         long totalMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos);
@@ -307,7 +303,7 @@ public class TableWriteCoordinator {
     }
 
     private SerializedScanResponse serializeScanResponse(
-            byte[] requestContent, Snapshot requestSnapshot, boolean streamingResponse)
+            byte[] requestContent, @Nullable Snapshot requestSnapshot, boolean streamingResponse)
             throws IOException {
         try (MetadataInitializationLog initialization =
                 MetadataInitializationLog.start(
@@ -450,7 +446,8 @@ public class TableWriteCoordinator {
         return scan(request, snapshot);
     }
 
-    private ScanCoordinationResponse scan(ScanCoordinationRequest request, Snapshot requestSnapshot)
+    private ScanCoordinationResponse scan(
+            ScanCoordinationRequest request, @Nullable Snapshot requestSnapshot)
             throws IOException {
         if (requestSnapshot == null) {
             return new ScanCoordinationResponse(null, null, null, null, null);

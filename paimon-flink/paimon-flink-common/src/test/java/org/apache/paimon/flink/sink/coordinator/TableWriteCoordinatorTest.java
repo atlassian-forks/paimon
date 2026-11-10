@@ -105,6 +105,73 @@ class TableWriteCoordinatorTest extends TableTestBase {
         assertThat(fileCount(directory)).isZero();
     }
 
+    @ParameterizedTest
+    @CsvSource({
+        "false,false,1 mb",
+        "true,true,1 mb",
+        "true,false,1 mb",
+        "false,true,1 mb",
+        "false,false,0 b",
+        "true,true,0 b"
+    })
+    void testEmptySnapshotPagingRemainsPinned(boolean jmSpill, boolean tmSpill, String cacheMemory)
+            throws Exception {
+        Identifier identifier = new Identifier(database, "empty_paging");
+        java.nio.file.Path directory = tempPath.resolve("empty-paging");
+        java.nio.file.Files.createDirectories(directory);
+        catalog.createTable(
+                identifier,
+                Schema.newBuilder()
+                        .column("f0", DataTypes.INT())
+                        .option(
+                                FlinkConnectorOptions.SINK_WRITER_COORDINATOR_PAGE_SIZE.key(),
+                                "10 b")
+                        .option(
+                                FlinkConnectorOptions.SINK_WRITER_COORDINATOR_SPILL_ENABLED.key(),
+                                "" + jmSpill)
+                        .option(
+                                FlinkConnectorOptions.SINK_WRITER_COORDINATOR_SPILL_DIRECTORY.key(),
+                                directory.toString())
+                        .option(
+                                FlinkConnectorOptions.SINK_WRITER_COORDINATOR_PAGED_CACHE_MEMORY
+                                        .key(),
+                                cacheMemory)
+                        .build(),
+                false);
+        FileStoreTable table = getTable(identifier);
+        TableWriteCoordinator coordinator = new TableWriteCoordinator(table);
+        TaskOperatorEventGateway gateway = mock(TaskOperatorEventGateway.class);
+        AtomicBoolean firstPage = new AtomicBoolean(true);
+        when(gateway.sendRequestToCoordinator(any(), any()))
+                .thenAnswer(
+                        invocation -> {
+                            SerializedValue<CoordinationRequest> value = invocation.getArgument(1);
+                            PagedCoordinationRequest request =
+                                    (PagedCoordinationRequest)
+                                            value.deserializeValue(getClass().getClassLoader());
+                            PagedCoordinationResponse response = coordinator.scan(request);
+                            if (firstPage.getAndSet(false)) {
+                                assertThat(response.nextPageToken()).isNotNull();
+                                // Create the first snapshot while the original empty response is
+                                // still paging.
+                                write(table, GenericRow.of(1));
+                                coordinator.checkpoint();
+                            }
+                            return CompletableFuture.completedFuture(
+                                    CoordinationResponseUtils.wrap(response));
+                        });
+        CoordinatedWriteRestore restore =
+                new CoordinatedWriteRestore(gateway, new OperatorID(), tmSpill, 64, directory);
+        RestoreFiles empty = restore.restoreFiles(EMPTY_ROW, 0, false, false);
+        assertThat(empty.snapshot()).isNull();
+        assertThat(empty.dataFiles()).isNullOrEmpty();
+        RestoreFiles current = restore.restoreFiles(EMPTY_ROW, 0, false, false);
+        assertThat(current.snapshot()).isNotNull();
+        assertThat(current.dataFiles()).hasSize(1);
+        assertThat(coordinator.pagedCoordinationEntries()).isZero();
+        assertThat(fileCount(directory)).isZero();
+    }
+
     @Test
     void testNewTaskManagerAcceptsLegacyJobManagerResponse() throws Exception {
         java.nio.file.Path directory = tempPath.resolve("legacy-jobmanager");
