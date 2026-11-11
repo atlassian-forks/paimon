@@ -429,7 +429,8 @@ public abstract class MergeTreeTestBase {
                         options.commitForceCompact(),
                         ChangelogProducer.NONE,
                         null,
-                        null);
+                        null,
+                        "table=merge-tree-test, partition=<unpartitioned>, bucket=0");
         writer.setMemoryPool(
                 new HeapMemorySegmentPool(options.writeBufferSize(), options.pageSize()));
         return writer;

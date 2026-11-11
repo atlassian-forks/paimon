@@ -39,6 +39,7 @@ import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.CommitIncrement;
 import org.apache.paimon.utils.ExecutorThreadFactory;
+import org.apache.paimon.utils.MemoryDiagnostics;
 import org.apache.paimon.utils.RecordWriter;
 import org.apache.paimon.utils.SnapshotManager;
 
@@ -55,6 +56,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 import static org.apache.paimon.CoreOptions.PARTITION_DEFAULT_NAME;
@@ -70,6 +72,7 @@ import static org.apache.paimon.utils.FileStorePathFactory.getPartitionComputer;
 public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
 
     private static final Logger LOG = LoggerFactory.getLogger(AbstractFileStoreWrite.class);
+    private static final Logger MEMORY_LOG = LoggerFactory.getLogger(MemoryDiagnostics.class);
 
     private final int writerNumberMax;
     @Nullable private final DynamicBucketIndexMaintainer.Factory dbMaintainerFactory;
@@ -90,6 +93,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     protected CompactionMetrics compactionMetrics = null;
     protected final String tableName;
     private final boolean legacyPartitionName;
+    private long lastMemoryLogNanos;
 
     protected AbstractFileStoreWrite(
             SnapshotManager snapshotManager,
@@ -152,15 +156,23 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     @Override
     public void write(BinaryRow partition, int bucket, T data) throws Exception {
         WriterContainer<T> container = getWriterWrapper(partition, bucket);
+        long writeStartNanos = System.nanoTime();
         container.writer.write(data);
+        long writeNanos = elapsedNanos(writeStartNanos);
+        container.recordWrite(writeNanos);
         if (container.dynamicBucketMaintainer != null) {
+            long notifyStartNanos = System.nanoTime();
             container.dynamicBucketMaintainer.notifyNewRecord((KeyValue) data);
+            container.recordDynamicBucketNotify(elapsedNanos(notifyStartNanos));
         }
     }
 
     @Override
     public void compact(BinaryRow partition, int bucket, boolean fullCompaction) throws Exception {
-        getWriterWrapper(partition, bucket).writer.compact(fullCompaction);
+        WriterContainer<T> container = getWriterWrapper(partition, bucket);
+        long compactStartNanos = System.nanoTime();
+        container.writer.compact(fullCompaction);
+        container.recordCompact(elapsedNanos(compactStartNanos));
     }
 
     @Override
@@ -184,6 +196,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     @Override
     public List<CommitMessage> prepareCommit(boolean waitCompaction, long commitIdentifier)
             throws Exception {
+        logMemoryObservation("prepare-commit");
         Function<WriterContainer<T>, Boolean> writerCleanChecker;
         if (writers.values().stream()
                         .map(Map::values)
@@ -212,7 +225,10 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                 int bucket = entry.getKey();
                 WriterContainer<T> writerContainer = entry.getValue();
 
+                long prepareCommitStartNanos = System.nanoTime();
                 CommitIncrement increment = writerContainer.writer.prepareCommit(waitCompaction);
+                long prepareCommitNanos = elapsedNanos(prepareCommitStartNanos);
+                writerContainer.recordPrepareCommit(prepareCommitNanos);
                 DataIncrement newFilesIncrement = increment.newFilesIncrement();
                 CompactIncrement compactIncrement = increment.compactIncrement();
                 if (writerContainer.dynamicBucketMaintainer != null) {
@@ -234,6 +250,17 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                                 newFilesIncrement,
                                 compactIncrement);
                 result.add(committable);
+                logWriterBucketStats(
+                        "prepare-commit",
+                        partition,
+                        bucket,
+                        writerContainer,
+                        prepareCommitNanos,
+                        newFilesIncrement,
+                        compactIncrement,
+                        waitCompaction,
+                        commitIdentifier,
+                        committable.isEmpty());
 
                 if (committable.isEmpty()) {
                     if (writerCleanChecker.apply(writerContainer)) {
@@ -302,6 +329,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
 
     @Override
     public void close() throws Exception {
+        logMemoryObservation("close");
         for (Map<Integer, WriterContainer<T>> bucketWriters : writers.values()) {
             for (WriterContainer<T> writerContainer : bucketWriters.values()) {
                 writerContainer.writer.close();
@@ -366,6 +394,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     @Override
     public void restore(List<State<T>> states) {
         for (State<T> state : states) {
+            long createWriterStartNanos = System.nanoTime();
             RecordWriter<T> writer =
                     createWriter(
                             state.partition,
@@ -375,6 +404,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                             state.commitIncrement,
                             compactExecutor(),
                             state.deletionVectorsMaintainer);
+            long createWriterNanos = elapsedNanos(createWriterStartNanos);
             notifyNewWriter(writer);
             WriterContainer<T> writerContainer =
                     new WriterContainer<>(
@@ -382,7 +412,16 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                             state.totalBuckets,
                             state.indexMaintainer,
                             state.deletionVectorsMaintainer,
-                            state.baseSnapshotId);
+                            state.baseSnapshotId,
+                            createWriterNanos,
+                            0L,
+                            createWriterNanos,
+                            0L,
+                            0L,
+                            state.dataFiles.size(),
+                            fileSize(new ArrayList<>(state.dataFiles)),
+                            rowCount(new ArrayList<>(state.dataFiles)));
+            logWriterInitialized(state.partition, state.bucket, writerContainer, true);
             writerContainer.lastModifiedCommitIdentifier = state.lastModifiedCommitIdentifier;
             writers.computeIfAbsent(state.partition, k -> new HashMap<>())
                     .put(state.bucket, writerContainer);
@@ -413,23 +452,31 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     }
 
     public WriterContainer<T> createWriterContainer(BinaryRow partition, int bucket) {
+        long createContainerStartNanos = System.nanoTime();
         if (LOG.isDebugEnabled()) {
             LOG.debug("Creating writer for partition {}, bucket {}", partition, bucket);
         }
 
+        long forceSpillNanos = 0L;
         if (writerNumber() >= writerNumberMax) {
             try {
+                long forceSpillStartNanos = System.nanoTime();
                 forceBufferSpill();
+                forceSpillNanos = elapsedNanos(forceSpillStartNanos);
             } catch (Exception e) {
                 throw new RuntimeException("Error happens while force buffer spill", e);
             }
         }
 
         RestoreFiles restored = RestoreFiles.empty();
+        long restoreNanos = 0L;
         if (!ignorePreviousFiles) {
+            long restoreStartNanos = System.nanoTime();
             restored = scanExistingFileMetas(partition, bucket);
+            restoreNanos = elapsedNanos(restoreStartNanos);
         }
 
+        long maintainerStartNanos = System.nanoTime();
         DynamicBucketIndexMaintainer indexMaintainer =
                 dbMaintainerFactory == null
                         ? null
@@ -440,11 +487,13 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                         ? null
                         : dvMaintainerFactory.create(
                                 partition, bucket, restored.deleteVectorsIndex());
+        long maintainerNanos = elapsedNanos(maintainerStartNanos);
 
         List<DataFileMeta> restoreFiles = restored.dataFiles();
         if (restoreFiles == null) {
             restoreFiles = new ArrayList<>();
         }
+        long createWriterStartNanos = System.nanoTime();
         RecordWriter<T> writer =
                 createWriter(
                         partition.copy(),
@@ -454,15 +503,56 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
                         null,
                         compactExecutor(),
                         dvMaintainer);
+        long createWriterNanos = elapsedNanos(createWriterStartNanos);
         notifyNewWriter(writer);
 
         Snapshot previousSnapshot = restored.snapshot();
-        return new WriterContainer<>(
-                writer,
-                firstNonNull(restored.totalBuckets(), numBuckets),
-                indexMaintainer,
-                dvMaintainer,
-                previousSnapshot == null ? null : previousSnapshot.id());
+        WriterContainer<T> writerContainer =
+                new WriterContainer<>(
+                        writer,
+                        firstNonNull(restored.totalBuckets(), numBuckets),
+                        indexMaintainer,
+                        dvMaintainer,
+                        previousSnapshot == null ? null : previousSnapshot.id(),
+                        elapsedNanos(createContainerStartNanos),
+                        restoreNanos,
+                        createWriterNanos,
+                        maintainerNanos,
+                        forceSpillNanos,
+                        restoreFiles.size(),
+                        fileSize(restoreFiles),
+                        rowCount(restoreFiles));
+        logWriterInitialized(partition, bucket, writerContainer, ignorePreviousFiles);
+        return writerContainer;
+    }
+
+    private void logMemoryObservation(String phase) {
+        long now = System.nanoTime();
+        if (lastMemoryLogNanos != 0 && now - lastMemoryLogNanos < TimeUnit.MINUTES.toNanos(1)) {
+            return;
+        }
+        lastMemoryLogNanos = now;
+        if (MEMORY_LOG.isInfoEnabled()) {
+            long restoredFilesAtCreation = 0;
+            for (Map<Integer, WriterContainer<T>> bucketWriters : writers.values()) {
+                for (WriterContainer<T> writer : bucketWriters.values()) {
+                    restoredFilesAtCreation += writer.restoredFileCount;
+                }
+            }
+            // Runs on the writer thread: do not inspect the mutable writer maps from a sampler.
+            MEMORY_LOG.info(
+                    "Writer memory observation: table={}, writeInstance={}, phase={}, "
+                            + "activePartitions={}, activeBucketWriters={}, "
+                            + "initialRestoredFilesForActiveWriters={}",
+                    tableName,
+                    System.identityHashCode(this),
+                    phase,
+                    writers.size(),
+                    writerNumber(),
+                    restoredFilesAtCreation);
+        }
+        FileSystemWriteRestore.logCacheStats();
+        MemoryDiagnostics.logJvmMemory("writer," + tableName + "," + phase);
     }
 
     private long writerNumber() {
@@ -488,20 +578,28 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
             totalBuckets = restoredTotalBuckets;
         }
         if (!ignoreNumBucketCheck && totalBuckets != numBuckets) {
-            String partInfo =
-                    partitionType.getFieldCount() > 0
-                            ? "partition "
-                                    + getPartitionComputer(
-                                                    partitionType,
-                                                    PARTITION_DEFAULT_NAME.defaultValue(),
-                                                    legacyPartitionName)
-                                            .generatePartValues(partition)
-                            : "table";
-            throw new RuntimeException(
-                    String.format(
-                            "Try to write %s with a new bucket num %d, but the previous bucket num is %d. "
-                                    + "Please switch to batch mode, and perform INSERT OVERWRITE to rescale current data layout first.",
-                            partInfo, numBuckets, totalBuckets));
+            if (partitionType.getFieldCount() > 0) {
+                // For partitioned tables, allow per-partition bucket counts.
+                // The partition's existing bucket count takes precedence over the
+                // table-level default. This supports rescale operations where different
+                // partitions may have different bucket counts.
+                LOG.info(
+                        "Partition {} uses {} buckets (table default: {}). "
+                                + "Accepting per-partition bucket count.",
+                        getPartitionComputer(
+                                        partitionType,
+                                        PARTITION_DEFAULT_NAME.defaultValue(),
+                                        legacyPartitionName)
+                                .generatePartValues(partition),
+                        totalBuckets,
+                        numBuckets);
+            } else {
+                throw new RuntimeException(
+                        String.format(
+                                "Try to write table with a new bucket num %d, but the previous bucket num is %d. "
+                                        + "Please switch to batch mode, and perform INSERT OVERWRITE to rescale current data layout first.",
+                                numBuckets, totalBuckets));
+            }
         }
         return restored;
     }
@@ -535,6 +633,132 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
     // force buffer spill to avoid out of memory in batch mode
     protected void forceBufferSpill() throws Exception {}
 
+    private void logWriterInitialized(
+            BinaryRow partition,
+            int bucket,
+            WriterContainer<T> writerContainer,
+            boolean ignoredPreviousFiles) {
+        LOG.info(
+                "Paimon writer initialized: table={}, partition={}, bucket={}, totalBuckets={}, "
+                        + "baseSnapshotId={}, ignoredPreviousFiles={}, restoredFiles={}, restoredBytes={}, "
+                        + "restoredRows={}, initMs={}, restoreMs={}, createWriterMs={}, "
+                        + "maintainerMs={}, forceSpillMs={}",
+                tableName,
+                readablePartition(partition),
+                bucket,
+                writerContainer.totalBuckets,
+                writerContainer.baseSnapshotId,
+                ignoredPreviousFiles,
+                writerContainer.restoredFileCount,
+                writerContainer.restoredFileBytes,
+                writerContainer.restoredRowCount,
+                toMillis(writerContainer.createContainerNanos),
+                toMillis(writerContainer.restoreNanos),
+                toMillis(writerContainer.createWriterNanos),
+                toMillis(writerContainer.maintainerNanos),
+                toMillis(writerContainer.forceSpillNanos));
+    }
+
+    private void logWriterBucketStats(
+            String stage,
+            BinaryRow partition,
+            int bucket,
+            WriterContainer<T> writerContainer,
+            long stageNanos,
+            DataIncrement newFilesIncrement,
+            CompactIncrement compactIncrement,
+            boolean waitCompaction,
+            long commitIdentifier,
+            boolean emptyCommit) {
+        LOG.info(
+                "Paimon writer bucket stats: stage={}, table={}, partition={}, bucket={}, "
+                        + "totalBuckets={}, baseSnapshotId={}, commitIdentifier={}, waitCompaction={}, "
+                        + "emptyCommit={}, recordsWritten={}, writeMs={}, avgWriteMicros={}, "
+                        + "maxWriteMs={}, compactCalls={}, compactMs={}, prepareCommitCalls={}, "
+                        + "prepareCommitMs={}, lastPrepareCommitMs={}, dynamicBucketNotifyMs={}, "
+                        + "initMs={}, restoreMs={}, createWriterMs={}, maintainerMs={}, forceSpillMs={}, "
+                        + "restoredFiles={}, restoredBytes={}, restoredRows={}, newFiles={}, newBytes={}, "
+                        + "newRows={}, deletedFiles={}, deletedBytes={}, compactBeforeFiles={}, "
+                        + "compactBeforeBytes={}, compactAfterFiles={}, compactAfterBytes={}, "
+                        + "changelogFiles={}, changelogBytes={}",
+                stage,
+                tableName,
+                readablePartition(partition),
+                bucket,
+                writerContainer.totalBuckets,
+                writerContainer.baseSnapshotId,
+                commitIdentifier,
+                waitCompaction,
+                emptyCommit,
+                writerContainer.recordsWritten,
+                toMillis(writerContainer.writeNanos),
+                writerContainer.recordsWritten == 0
+                        ? 0
+                        : writerContainer.writeNanos / writerContainer.recordsWritten / 1_000,
+                toMillis(writerContainer.maxWriteNanos),
+                writerContainer.compactCalls,
+                toMillis(writerContainer.compactNanos),
+                writerContainer.prepareCommitCalls,
+                toMillis(writerContainer.prepareCommitNanos),
+                toMillis(stageNanos),
+                toMillis(writerContainer.dynamicBucketNotifyNanos),
+                toMillis(writerContainer.createContainerNanos),
+                toMillis(writerContainer.restoreNanos),
+                toMillis(writerContainer.createWriterNanos),
+                toMillis(writerContainer.maintainerNanos),
+                toMillis(writerContainer.forceSpillNanos),
+                writerContainer.restoredFileCount,
+                writerContainer.restoredFileBytes,
+                writerContainer.restoredRowCount,
+                newFilesIncrement.newFiles().size(),
+                fileSize(newFilesIncrement.newFiles()),
+                rowCount(newFilesIncrement.newFiles()),
+                newFilesIncrement.deletedFiles().size(),
+                fileSize(newFilesIncrement.deletedFiles()),
+                compactIncrement.compactBefore().size(),
+                fileSize(compactIncrement.compactBefore()),
+                compactIncrement.compactAfter().size(),
+                fileSize(compactIncrement.compactAfter()),
+                newFilesIncrement.changelogFiles().size()
+                        + compactIncrement.changelogFiles().size(),
+                fileSize(newFilesIncrement.changelogFiles())
+                        + fileSize(compactIncrement.changelogFiles()));
+    }
+
+    protected String readablePartition(BinaryRow partition) {
+        if (partitionType.getFieldCount() == 0) {
+            return "<unpartitioned>";
+        }
+        return getPartitionComputer(
+                        partitionType, PARTITION_DEFAULT_NAME.defaultValue(), legacyPartitionName)
+                .generatePartValues(partition)
+                .toString();
+    }
+
+    private static long elapsedNanos(long startNanos) {
+        return System.nanoTime() - startNanos;
+    }
+
+    private static long toMillis(long nanos) {
+        return nanos / 1_000_000;
+    }
+
+    private static long fileSize(List<DataFileMeta> files) {
+        long fileSize = 0L;
+        for (DataFileMeta file : files) {
+            fileSize += file.fileSize();
+        }
+        return fileSize;
+    }
+
+    private static long rowCount(List<DataFileMeta> files) {
+        long rowCount = 0L;
+        for (DataFileMeta file : files) {
+            rowCount += file.rowCount();
+        }
+        return rowCount;
+    }
+
     /**
      * {@link RecordWriter} with the snapshot id it is created upon and the identifier of its last
      * modified commit.
@@ -547,13 +771,37 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
         @Nullable public final BucketedDvMaintainer deletionVectorsMaintainer;
         protected final long baseSnapshotId;
         protected long lastModifiedCommitIdentifier;
+        private final long createContainerNanos;
+        private final long restoreNanos;
+        private final long createWriterNanos;
+        private final long maintainerNanos;
+        private final long forceSpillNanos;
+        private final int restoredFileCount;
+        private final long restoredFileBytes;
+        private final long restoredRowCount;
+        private long recordsWritten;
+        private long writeNanos;
+        private long maxWriteNanos;
+        private long compactCalls;
+        private long compactNanos;
+        private long prepareCommitCalls;
+        private long prepareCommitNanos;
+        private long dynamicBucketNotifyNanos;
 
         protected WriterContainer(
                 RecordWriter<T> writer,
                 int totalBuckets,
                 @Nullable DynamicBucketIndexMaintainer dynamicBucketMaintainer,
                 @Nullable BucketedDvMaintainer deletionVectorsMaintainer,
-                Long baseSnapshotId) {
+                Long baseSnapshotId,
+                long createContainerNanos,
+                long restoreNanos,
+                long createWriterNanos,
+                long maintainerNanos,
+                long forceSpillNanos,
+                int restoredFileCount,
+                long restoredFileBytes,
+                long restoredRowCount) {
             this.writer = writer;
             this.totalBuckets = totalBuckets;
             this.dynamicBucketMaintainer = dynamicBucketMaintainer;
@@ -561,6 +809,34 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
             this.baseSnapshotId =
                     baseSnapshotId == null ? Snapshot.FIRST_SNAPSHOT_ID - 1 : baseSnapshotId;
             this.lastModifiedCommitIdentifier = Long.MIN_VALUE;
+            this.createContainerNanos = createContainerNanos;
+            this.restoreNanos = restoreNanos;
+            this.createWriterNanos = createWriterNanos;
+            this.maintainerNanos = maintainerNanos;
+            this.forceSpillNanos = forceSpillNanos;
+            this.restoredFileCount = restoredFileCount;
+            this.restoredFileBytes = restoredFileBytes;
+            this.restoredRowCount = restoredRowCount;
+        }
+
+        private void recordWrite(long writeNanos) {
+            recordsWritten++;
+            this.writeNanos += writeNanos;
+            this.maxWriteNanos = Math.max(this.maxWriteNanos, writeNanos);
+        }
+
+        private void recordCompact(long compactNanos) {
+            compactCalls++;
+            this.compactNanos += compactNanos;
+        }
+
+        private void recordPrepareCommit(long prepareCommitNanos) {
+            prepareCommitCalls++;
+            this.prepareCommitNanos += prepareCommitNanos;
+        }
+
+        private void recordDynamicBucketNotify(long notifyNanos) {
+            dynamicBucketNotifyNanos += notifyNanos;
         }
     }
 

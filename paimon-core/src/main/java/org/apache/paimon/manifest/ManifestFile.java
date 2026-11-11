@@ -40,6 +40,9 @@ import org.apache.paimon.utils.PathFactory;
 import org.apache.paimon.utils.SegmentsCache;
 import org.apache.paimon.utils.VersionedObjectSerializer;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import javax.annotation.Nullable;
 
 import java.io.IOException;
@@ -52,6 +55,8 @@ import java.util.List;
  * snapshot.
  */
 public class ManifestFile extends ObjectsFile<ManifestEntry> {
+
+    private static final Logger LOG = LoggerFactory.getLogger(ManifestFile.class);
 
     private final SchemaManager schemaManager;
     private final RowType partitionType;

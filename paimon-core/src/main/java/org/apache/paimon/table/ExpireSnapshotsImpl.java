@@ -23,6 +23,7 @@ import org.apache.paimon.Snapshot;
 import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.consumer.ConsumerManager;
 import org.apache.paimon.manifest.ExpireFileEntry;
+import org.apache.paimon.operation.MaintenanceProgress;
 import org.apache.paimon.operation.SnapshotDeletion;
 import org.apache.paimon.options.ExpireConfig;
 import org.apache.paimon.utils.ChangelogManager;
@@ -83,6 +84,20 @@ public class ExpireSnapshotsImpl implements ExpireSnapshots {
 
     @Override
     public int expire() {
+        try (MaintenanceProgress progress =
+                new MaintenanceProgress(
+                        "operation=expire-snapshots table="
+                                + snapshotManager.tablePath()
+                                + " branch="
+                                + snapshotManager.branch(),
+                        "evaluate-retention")) {
+            int expired = expire(progress);
+            progress.complete();
+            return expired;
+        }
+    }
+
+    private int expire(MaintenanceProgress progress) {
         snapshotDeletion.setChangelogDecoupled(expireConfig.isChangelogDecoupled());
         int retainMax = expireConfig.getSnapshotRetainMax();
         int retainMin = expireConfig.getSnapshotRetainMin();
@@ -90,6 +105,9 @@ public class ExpireSnapshotsImpl implements ExpireSnapshots {
         long olderThanMills =
                 System.currentTimeMillis() - expireConfig.getSnapshotTimeRetain().toMillis();
 
+        progress.add("retain_min", retainMin);
+        progress.add("retain_max", retainMax);
+        progress.add("max_deletes", maxDeletes);
         Long latestSnapshotId = snapshotManager.latestSnapshotId();
         if (latestSnapshotId == null) {
             // no snapshot, nothing to expire
@@ -129,15 +147,37 @@ public class ExpireSnapshotsImpl implements ExpireSnapshots {
             // (the maximum time of snapshots to retain)
             if (snapshotManager.snapshotExists(id)
                     && olderThanMills <= snapshotManager.snapshot(id).timeMillis()) {
+                progress.phase("expire-selected-range");
                 return expireUntil(earliest, id);
             }
         }
 
+        progress.phase("expire-selected-range");
         return expireUntil(earliest, maxExclusive);
     }
 
     @VisibleForTesting
     public int expireUntil(long earliestId, long endExclusiveId) {
+        try (MaintenanceProgress progress =
+                new MaintenanceProgress(
+                        "operation=expire-snapshots table="
+                                + snapshotManager.tablePath()
+                                + " branch="
+                                + snapshotManager.branch()
+                                + " range=["
+                                + earliestId
+                                + ","
+                                + endExclusiveId
+                                + ")",
+                        "select-expiration-range")) {
+            int expired = expireUntil(earliestId, endExclusiveId, progress);
+            progress.add("snapshots_expired", expired);
+            progress.complete();
+            return expired;
+        }
+    }
+
+    private int expireUntil(long earliestId, long endExclusiveId, MaintenanceProgress progress) {
         long startTime = System.currentTimeMillis();
 
         if (endExclusiveId <= earliestId) {
@@ -163,8 +203,11 @@ public class ExpireSnapshotsImpl implements ExpireSnapshots {
             }
         }
 
+        progress.phase("load-protected-tags");
         List<Snapshot> taggedSnapshots = tagManager.taggedSnapshots();
+        progress.add("protected_tags", taggedSnapshots.size());
 
+        progress.phase("delete-unused-data-files");
         // delete merge tree files
         // deleted merge tree files in a snapshot are not used by the next snapshot, so the range of
         // id should be (beginInclusiveId, endExclusiveId]
@@ -189,12 +232,17 @@ public class ExpireSnapshotsImpl implements ExpireSnapshots {
                                 "Skip cleaning data files of snapshot '%s' due to failed to build skipping set.",
                                 id),
                         e);
+                progress.add("data_snapshots_skipped", 1);
                 continue;
             }
 
+            long item = progress.startItem("snapshot=" + id);
             snapshotDeletion.cleanUnusedDataFiles(snapshot, skipper);
+            progress.finishItem(item);
+            progress.add("data_snapshots_processed", 1);
         }
 
+        progress.phase("delete-changelog-files");
         // delete changelog files
         if (!expireConfig.isChangelogDecoupled()) {
             for (long id = beginInclusiveId; id < endExclusiveId; id++) {
@@ -216,8 +264,10 @@ public class ExpireSnapshotsImpl implements ExpireSnapshots {
 
         // data files and changelog files in bucket directories has been deleted
         // then delete changed bucket directories if they are empty
+        progress.phase("clean-empty-directories");
         snapshotDeletion.cleanEmptyDirectories();
 
+        progress.phase("build-protected-manifest-set");
         // delete manifests and indexFiles
         List<Snapshot> skippingSnapshots =
                 findSkippingTags(taggedSnapshots, beginInclusiveId, endExclusiveId);
@@ -236,6 +286,7 @@ public class ExpireSnapshotsImpl implements ExpireSnapshots {
         } catch (Exception e) {
             LOG.info("Skip cleaning manifest files due to failed to build skipping set.", e);
         }
+        progress.phase("delete-unused-manifests-and-indexes");
         if (skippingSet != null) {
             for (long id = beginInclusiveId; id < endExclusiveId; id++) {
                 if (LOG.isDebugEnabled()) {
@@ -249,10 +300,14 @@ public class ExpireSnapshotsImpl implements ExpireSnapshots {
                     beginInclusiveId = id + 1;
                     continue;
                 }
+                long item = progress.startItem("snapshot=" + id);
                 snapshotDeletion.cleanUnusedManifests(snapshot, skippingSet);
+                progress.finishItem(item);
+                progress.add("manifest_snapshots_processed", 1);
             }
         }
 
+        progress.phase("delete-snapshot-metadata");
         // delete snapshot file finally
         for (long id = beginInclusiveId; id < endExclusiveId; id++) {
             Snapshot snapshot;
@@ -266,8 +321,10 @@ public class ExpireSnapshotsImpl implements ExpireSnapshots {
                 commitChangelog(new Changelog(snapshot));
             }
             snapshotManager.deleteSnapshot(id);
+            progress.add("snapshot_delete_calls_completed", 1);
         }
 
+        progress.phase("commit-earliest-hint");
         writeEarliestHint(endExclusiveId);
         long duration = System.currentTimeMillis() - startTime;
         LOG.info(

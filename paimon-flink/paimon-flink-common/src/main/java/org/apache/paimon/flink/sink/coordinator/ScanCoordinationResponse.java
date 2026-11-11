@@ -23,6 +23,7 @@ import org.apache.paimon.index.IndexFileMeta;
 import org.apache.paimon.index.IndexFileMetaSerializer;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.io.DataFileMetaSerializer;
+import org.apache.paimon.stats.SimpleStats;
 
 import org.apache.flink.runtime.operators.coordination.CoordinationResponse;
 
@@ -43,6 +44,15 @@ public class ScanCoordinationResponse implements CoordinationResponse {
     @Nullable private final byte[] dynamicBucketIndex;
     @Nullable private final List<byte[]> deleteVectorsIndex;
 
+    // Diagnostic-only values derived while the response is built. They are deliberately transient
+    // so adding observability does not increase the coordinator response sent to TaskManagers.
+    private transient long serializedDataFilesBytes;
+    private transient long rawStatsPayloadBytes;
+    private transient long rawKeyBoundsPayloadBytes;
+    private transient long embeddedIndexPayloadBytes;
+    private transient long serializedIndexBytes;
+    private transient int streamedDataFileCount;
+
     public ScanCoordinationResponse(
             @Nullable Snapshot snapshot,
             @Nullable Integer totalBuckets,
@@ -57,7 +67,9 @@ public class ScanCoordinationResponse implements CoordinationResponse {
         if (dataFiles != null) {
             this.dataFiles = new ArrayList<>(dataFiles.size());
             for (DataFileMeta dataFile : dataFiles) {
-                this.dataFiles.add(serializer.serializeToBytes(dataFile));
+                byte[] serializedDataFile = serializer.serializeToBytes(dataFile);
+                this.dataFiles.add(serializedDataFile);
+                recordDataFile(dataFile, serializedDataFile.length);
             }
         } else {
             this.dataFiles = null;
@@ -66,6 +78,7 @@ public class ScanCoordinationResponse implements CoordinationResponse {
         IndexFileMetaSerializer indexSerializer = new IndexFileMetaSerializer();
         if (dynamicBucketIndex != null) {
             this.dynamicBucketIndex = indexSerializer.serializeToBytes(dynamicBucketIndex);
+            serializedIndexBytes += this.dynamicBucketIndex.length;
         } else {
             this.dynamicBucketIndex = null;
         }
@@ -73,11 +86,61 @@ public class ScanCoordinationResponse implements CoordinationResponse {
         if (deleteVectorsIndex != null) {
             this.deleteVectorsIndex = new ArrayList<>(deleteVectorsIndex.size());
             for (IndexFileMeta indexFile : deleteVectorsIndex) {
-                this.deleteVectorsIndex.add(indexSerializer.serializeToBytes(indexFile));
+                byte[] serializedIndex = indexSerializer.serializeToBytes(indexFile);
+                this.deleteVectorsIndex.add(serializedIndex);
+                serializedIndexBytes += serializedIndex.length;
             }
         } else {
             this.deleteVectorsIndex = null;
         }
+    }
+
+    int dataFileCount() {
+        return dataFiles == null ? streamedDataFileCount : dataFiles.size();
+    }
+
+    void recordDataFile(DataFileMeta dataFile, int length) {
+        streamedDataFileCount++;
+        serializedDataFilesBytes += length;
+        rawStatsPayloadBytes += statsPayloadBytes(dataFile);
+        rawKeyBoundsPayloadBytes +=
+                (long) dataFile.minKey().getSizeInBytes() + dataFile.maxKey().getSizeInBytes();
+        byte[] embeddedIndex = dataFile.embeddedIndex();
+        embeddedIndexPayloadBytes += embeddedIndex == null ? 0 : embeddedIndex.length;
+    }
+
+    void recordSerializedIndex(int length) {
+        serializedIndexBytes += length;
+    }
+
+    long serializedDataFilesBytes() {
+        return serializedDataFilesBytes;
+    }
+
+    long rawStatsPayloadBytes() {
+        return rawStatsPayloadBytes;
+    }
+
+    long rawKeyBoundsPayloadBytes() {
+        return rawKeyBoundsPayloadBytes;
+    }
+
+    long embeddedIndexPayloadBytes() {
+        return embeddedIndexPayloadBytes;
+    }
+
+    long serializedIndexBytes() {
+        return serializedIndexBytes;
+    }
+
+    private static long statsPayloadBytes(DataFileMeta dataFile) {
+        return statsPayloadBytes(dataFile.keyStats()) + statsPayloadBytes(dataFile.valueStats());
+    }
+
+    private static long statsPayloadBytes(SimpleStats stats) {
+        return (long) stats.minValues().getSizeInBytes()
+                + stats.maxValues().getSizeInBytes()
+                + stats.nullCounts().getSizeInBytes();
     }
 
     @Nullable
