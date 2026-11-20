@@ -87,6 +87,47 @@ class RecordLevelExpireTest extends PrimaryKeyTableTestBase {
     }
 
     @Test
+    public void testNullOnlyFallbackDuringCompaction() throws Exception {
+        table.schemaManager()
+                .commitChanges(
+                        Collections.singletonList(
+                                SchemaChange.addColumn("event_time", DataTypes.BIGINT())));
+        refreshTable();
+        Map<String, String> options = new HashMap<>();
+        options.put(CoreOptions.RECORD_LEVEL_EXPIRE_TIME.key(), "0s");
+        options.put(CoreOptions.RECORD_LEVEL_FALLBACK_TIME_FIELD.key(), "event_time");
+        options.put(CoreOptions.RECORD_LEVEL_FALLBACK_EXPIRE_TIME.key(), "366d");
+        options.put(CoreOptions.WRITE_ONLY.key(), "true");
+        table = table.copy(options);
+        int now = (int) (System.currentTimeMillis() / 1000);
+        long oldEvent = now - Duration.ofDays(367).getSeconds();
+        writeCommit(
+                GenericRow.of(1, 1, null, oldEvent),
+                GenericRow.of(1, 2, null, (long) now),
+                GenericRow.of(1, 3, now + 3600, oldEvent),
+                GenericRow.of(1, 4, now - 3600, (long) now),
+                GenericRow.of(1, 5, null, null));
+        // A mixed file's future primary minimum must not hide expired fallback rows.
+        RecordLevelExpire expire =
+                RecordLevelExpire.create(
+                        table.coreOptions(), table.schema(), table.schemaManager());
+        for (DataSplit split : table.newSnapshotReader().read().dataSplits()) {
+            for (DataFileMeta file : split.dataFiles()) {
+                assertThat(expire.isExpireFile(file)).isTrue();
+            }
+        }
+        compact(1);
+        assertThat(query())
+                .containsExactlyInAnyOrder(
+                        GenericRow.of(1, 2, null),
+                        GenericRow.of(1, 3, now + 3600),
+                        GenericRow.of(1, 5, null));
+        // Repeating compaction is safe and does not materialize the fallback column.
+        compact(1);
+        assertThat(query()).hasSize(3);
+    }
+
+    @Test
     public void testConvertFieldToSecond() {
         Function<InternalRow, Optional<Long>> fieldGetter =
                 RecordLevelExpire.createFieldGetterAndConvertToSecond(DataTypes.INT(), 0);
