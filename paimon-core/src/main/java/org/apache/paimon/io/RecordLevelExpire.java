@@ -54,6 +54,7 @@ public class RecordLevelExpire {
     private static final Logger LOG = LoggerFactory.getLogger(RecordLevelExpire.class);
 
     private final long expireTime;
+    private final boolean fallbackEnabled;
     private final Function<InternalRow, Optional<Long>> fieldGetter;
 
     private final ConcurrentMap<Long, TableSchema> tableSchemas;
@@ -88,18 +89,56 @@ public class RecordLevelExpire {
         Function<InternalRow, Optional<Long>> fieldGetter =
                 createFieldGetterAndConvertToSecond(dataType, fieldIndex);
 
+        String fallbackField =
+                options.toConfiguration().get(CoreOptions.RECORD_LEVEL_FALLBACK_TIME_FIELD);
+        Duration fallbackDuration =
+                options.toConfiguration().get(CoreOptions.RECORD_LEVEL_FALLBACK_EXPIRE_TIME);
+        if ((fallbackField == null) != (fallbackDuration == null)) {
+            throw new IllegalArgumentException(
+                    "Both record-level.fallback-time-field and record-level.fallback-expire-time must be set.");
+        }
+        if (fallbackField != null) {
+            if (fallbackDuration.isNegative()) {
+                throw new IllegalArgumentException(
+                        "Fallback expiry duration must not be negative.");
+            }
+            int fallbackIndex = rowType.getFieldIndex(fallbackField);
+            if (fallbackIndex < 0) {
+                throw new IllegalArgumentException(
+                        "Cannot find fallback time field: " + fallbackField);
+            }
+            Function<InternalRow, Optional<Long>> primaryGetter = fieldGetter;
+            Function<InternalRow, Optional<Long>> fallbackGetter =
+                    createFieldGetterAndConvertToSecond(
+                            rowType.getField(fallbackField).type(), fallbackIndex);
+            long offset =
+                    Math.subtractExact(fallbackDuration.getSeconds(), expireTime.getSeconds());
+            fieldGetter =
+                    row -> {
+                        Optional<Long> primary = primaryGetter.apply(row);
+                        return primary.isPresent()
+                                ? primary
+                                : fallbackGetter
+                                        .apply(row)
+                                        .map(value -> Math.addExact(value, offset));
+                    };
+        }
+
         LOG.info(
                 "Create RecordExpire. expireTime is {}s,timeField is {}",
                 expireTime.getSeconds(),
                 timeFieldName);
-        return new RecordLevelExpire(expireTime.getSeconds(), fieldGetter, schema, schemaManager);
+        return new RecordLevelExpire(
+                expireTime.getSeconds(), fieldGetter, schema, schemaManager, fallbackField != null);
     }
 
     private RecordLevelExpire(
             long expireTime,
             Function<InternalRow, Optional<Long>> fieldGetter,
             TableSchema schema,
-            SchemaManager schemaManager) {
+            SchemaManager schemaManager,
+            boolean fallbackEnabled) {
+        this.fallbackEnabled = fallbackEnabled;
         this.expireTime = expireTime;
         this.fieldGetter = fieldGetter;
 
@@ -116,6 +155,12 @@ public class RecordLevelExpire {
     }
 
     public boolean isExpireFile(DataFileMeta file) {
+        if (fallbackEnabled) {
+            // Minima of separate columns do not describe a row's conditional expiry. In
+            // particular, a non-null primary minimum can hide expired null-primary rows.
+            // Select conservatively; the row filter below makes the deletion decision.
+            return true;
+        }
         InternalRow minValues = file.valueStats().minValues();
 
         if (file.schemaId() != schema.id() || file.valueStatsCols() != null) {
