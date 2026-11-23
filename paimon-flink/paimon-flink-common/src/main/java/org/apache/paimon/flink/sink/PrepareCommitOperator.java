@@ -27,6 +27,7 @@ import org.apache.paimon.memory.MemorySegmentPool;
 import org.apache.paimon.options.Options;
 
 import org.apache.flink.runtime.memory.MemoryManager;
+import org.apache.flink.runtime.metrics.TimerGauge;
 import org.apache.flink.streaming.api.graph.StreamConfig;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperatorFactory;
@@ -45,6 +46,7 @@ import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.List;
 
+import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_REPORT_IO_WAIT_AS_IDLE;
 import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_USE_MANAGED_MEMORY;
 import static org.apache.paimon.flink.utils.ManagedMemoryUtils.computeManagedMemory;
 
@@ -59,6 +61,12 @@ public abstract class PrepareCommitOperator<IN, OUT> extends AbstractStreamOpera
     protected final Options options;
     private boolean endOfInput = false;
 
+    /**
+     * Flink's idle timer of this task, only set when {@link
+     * org.apache.paimon.flink.FlinkConnectorOptions#SINK_REPORT_IO_WAIT_AS_IDLE} is enabled.
+     */
+    @Nullable private transient TimerGauge idleTimer;
+
     public PrepareCommitOperator(StreamOperatorParameters<OUT> parameters, Options options) {
         this.options = options;
         setup(parameters.getContainingTask(), parameters.getStreamConfig(), parameters.getOutput());
@@ -70,6 +78,15 @@ public abstract class PrepareCommitOperator<IN, OUT> extends AbstractStreamOpera
             StreamConfig config,
             Output<StreamRecord<OUT>> output) {
         super.setup(containingTask, config, output);
+
+        if (options.get(SINK_REPORT_IO_WAIT_AS_IDLE)) {
+            idleTimer =
+                    containingTask
+                            .getEnvironment()
+                            .getMetricGroup()
+                            .getIOMetricGroup()
+                            .getIdleTimeMsPerSecond();
+        }
 
         MemorySegmentPool memoryPool;
         if (options.get(SINK_USE_MANAGED_MEMORY)) {
@@ -112,8 +129,32 @@ public abstract class PrepareCommitOperator<IN, OUT> extends AbstractStreamOpera
     }
 
     private void emitCommittables(boolean waitCompaction, long checkpointId) throws IOException {
-        prepareCommit(waitCompaction, checkpointId)
-                .forEach(committable -> output.collect(new StreamRecord<>(committable)));
+        List<OUT> committables = prepareCommitAsIdle(waitCompaction, checkpointId);
+        committables.forEach(committable -> output.collect(new StreamRecord<>(committable)));
+    }
+
+    /**
+     * Runs {@link #prepareCommit} and, if enabled, reports the time it takes as idle time. The
+     * flush mostly blocks on file system I/O, which Flink would otherwise count as busy time and
+     * which the autoscaler would read as load. Only the flush is covered, not the emission of the
+     * committables, because Flink accounts downstream back pressure separately. Note that the CPU
+     * time spent in the flush is reported as idle as well.
+     */
+    private List<OUT> prepareCommitAsIdle(boolean waitCompaction, long checkpointId)
+            throws IOException {
+        // Only stop the timer if we started it, so that a measurement which is already running
+        // (TimerGauge#markStart is a no-op then) is not cut short by our markEnd.
+        boolean ownsTimer = idleTimer != null && !idleTimer.isMeasuring();
+        if (ownsTimer) {
+            idleTimer.markStart();
+        }
+        try {
+            return prepareCommit(waitCompaction, checkpointId);
+        } finally {
+            if (ownsTimer) {
+                idleTimer.markEnd();
+            }
+        }
     }
 
     protected abstract List<OUT> prepareCommit(boolean waitCompaction, long checkpointId)
