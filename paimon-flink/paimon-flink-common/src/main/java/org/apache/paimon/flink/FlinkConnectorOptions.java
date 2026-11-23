@@ -241,6 +241,18 @@ public class FlinkConnectorOptions {
                             "If true, flink sink will use managed memory for merge tree; otherwise, "
                                     + "it will create an independent memory allocator.");
 
+    public static final ConfigOption<Boolean> SINK_REPORT_IO_WAIT_AS_IDLE =
+            ConfigOptions.key("sink.report-io-wait-as-idle")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "If true, the time the sink spends blocked in the checkpoint flush "
+                                    + "(prepareCommit, which mostly waits on file system I/O) is "
+                                    + "reported as idle time instead of busy time. Flink's "
+                                    + "busyTimeMsPerSecond metric, and therefore the autoscaler, "
+                                    + "then does not treat this I/O wait as load. Note that the "
+                                    + "CPU time spent in the flush is also counted as idle.");
+
     public static final ConfigOption<Boolean> SCAN_REMOVE_NORMALIZE =
             key("scan.remove-normalize")
                     .booleanType()
