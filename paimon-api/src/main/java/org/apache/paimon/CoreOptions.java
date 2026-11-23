@@ -1719,6 +1719,23 @@ public class CoreOptions implements Serializable {
                                     + "there is no strong guarantee to expire records in time. "
                                     + "You must specific 'record-level.time-field' too.");
 
+    public static final ConfigOption<String> RECORD_LEVEL_FALLBACK_TIME_FIELD =
+            key("record-level.fallback-time-field")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Optional time field used only when record-level.time-field is null. "
+                                    + "Requires record-level.fallback-expire-time. Existing non-null "
+                                    + "time-field values retain their original expiry semantics.");
+
+    public static final ConfigOption<Duration> RECORD_LEVEL_FALLBACK_EXPIRE_TIME =
+            key("record-level.fallback-expire-time")
+                    .durationType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Retention duration added to record-level.fallback-time-field when "
+                                    + "the primary record-level.time-field is null. Does not rewrite rows.");
+
     public static final ConfigOption<String> RECORD_LEVEL_TIME_FIELD =
             key("record-level.time-field")
                     .stringType()
