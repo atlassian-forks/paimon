@@ -294,6 +294,17 @@ under the License.
         </dependencies>
     </dependencyManagement>
 
+    <distributionManagement>
+        <repository>
+            <id>atlassian-3rdparty</id>
+            <url>https://packages.atlassian.com/maven/3rdparty</url>
+        </repository>
+        <snapshotRepository>
+            <id>atlassian-3rdparty</id>
+            <url>https://packages.atlassian.com/maven/3rdparty</url>
+        </snapshotRepository>
+    </distributionManagement>
+
     <profiles>
         <!--
           We're reusing the apache-release build profile defined in the Apache Parent POM,
