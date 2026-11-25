@@ -297,6 +297,12 @@ under the License.
             <td>Defines a custom parallelism for the sink. By default, if this option is not defined, the planner will derive the parallelism for each statement individually by also considering the global configuration.</td>
         </tr>
         <tr>
+            <td><h5>sink.report-io-wait-as-idle</h5></td>
+            <td style="word-wrap: break-word;">false</td>
+            <td>Boolean</td>
+            <td>If true, the time the sink spends blocked in the checkpoint flush (prepareCommit, which mostly waits on file system I/O) is reported as idle time instead of busy time. Flink's busyTimeMsPerSecond metric, and therefore the autoscaler, then does not treat this I/O wait as load. Note that the CPU time spent in the flush is also counted as idle.</td>
+        </tr>
+        <tr>
             <td><h5>sink.savepoint.auto-tag</h5></td>
             <td style="word-wrap: break-word;">false</td>
             <td>Boolean</td>
