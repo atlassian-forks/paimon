@@ -126,6 +126,10 @@ public class SortBufferWriteBuffer implements WriteBuffer {
                         : inMemorySortBuffer;
     }
 
+    public String bufferType() {
+        return buffer.getClass().getSimpleName();
+    }
+
     @Override
     public boolean put(long sequenceNumber, RowKind valueKind, InternalRow key, InternalRow value)
             throws IOException {

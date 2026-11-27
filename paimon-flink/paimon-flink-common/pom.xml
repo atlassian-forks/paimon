@@ -217,6 +217,13 @@ under the License.
             <version>${apache.hc.client.version}</version>
             <scope>test</scope>
         </dependency>
+        <!-- Object-graph sizing is used only by the manual manifest memory benchmark. -->
+        <dependency>
+            <groupId>org.openjdk.jol</groupId>
+            <artifactId>jol-core</artifactId>
+            <version>0.17</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
 

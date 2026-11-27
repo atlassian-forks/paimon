@@ -1719,6 +1719,23 @@ public class CoreOptions implements Serializable {
                                     + "there is no strong guarantee to expire records in time. "
                                     + "You must specific 'record-level.time-field' too.");
 
+    public static final ConfigOption<String> RECORD_LEVEL_FALLBACK_TIME_FIELD =
+            key("record-level.fallback-time-field")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Optional time field used only when record-level.time-field is null. "
+                                    + "Requires record-level.fallback-expire-time. Existing non-null "
+                                    + "time-field values retain their original expiry semantics.");
+
+    public static final ConfigOption<Duration> RECORD_LEVEL_FALLBACK_EXPIRE_TIME =
+            key("record-level.fallback-expire-time")
+                    .durationType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Retention duration added to record-level.fallback-time-field when "
+                                    + "the primary record-level.time-field is null. Does not rewrite rows.");
+
     public static final ConfigOption<String> RECORD_LEVEL_TIME_FIELD =
             key("record-level.time-field")
                     .stringType()
@@ -1800,6 +1817,32 @@ public class CoreOptions implements Serializable {
                     .withDescription(
                             "For DELETE manifest entry in manifest file, drop stats to reduce memory and storage."
                                     + " Default value is false only for compatibility of old reader.");
+
+    public static final ConfigOption<Boolean> MANIFEST_PREFETCH_ENTRIES =
+            key("manifest.prefetch-entries")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Prefetch all manifest entries when initializing writers, reduces API requests to object store filesystems."
+                                    + " This is useful for jobs that write to or compacts many partitions at once,"
+                                    + " however more memory is required as the entire manifest is loaded.");
+
+    public static final ConfigOption<Boolean> PARTITION_BUCKET_MAPPING_CACHE_ENABLED =
+            key("partition-bucket-mapping.cache-enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "If true, cache partition bucket mappings in the current JVM when initializing writers."
+                                    + " This avoids repeated manifest scans by multiple writers in the same TaskManager,"
+                                    + " but the cached mapping is shared until the table snapshot changes.");
+
+    public static final ConfigOption<Integer> PARTITION_BUCKET_MAPPING_CACHE_MAX_ENTRIES =
+            key("partition-bucket-mapping.cache-max-entries")
+                    .intType()
+                    .defaultValue(128)
+                    .withDescription(
+                            "Maximum number of partition bucket mappings to cache in the current JVM."
+                                    + " Older snapshots of the same table are invalidated when a newer snapshot mapping is loaded.");
 
     public static final ConfigOption<Boolean> DATA_FILE_THIN_MODE =
             key("data-file.thin-mode")
@@ -2535,6 +2578,18 @@ public class CoreOptions implements Serializable {
 
     public boolean manifestDeleteFileDropStats() {
         return options.get(MANIFEST_DELETE_FILE_DROP_STATS);
+    }
+
+    public boolean prefetchManifestEntries() {
+        return options.get(MANIFEST_PREFETCH_ENTRIES);
+    }
+
+    public boolean partitionBucketMappingCacheEnabled() {
+        return options.get(PARTITION_BUCKET_MAPPING_CACHE_ENABLED);
+    }
+
+    public int partitionBucketMappingCacheMaxEntries() {
+        return options.get(PARTITION_BUCKET_MAPPING_CACHE_MAX_ENTRIES);
     }
 
     public boolean disableNullToNotNull() {

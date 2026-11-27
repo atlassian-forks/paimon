@@ -25,14 +25,31 @@ import javax.annotation.Nullable;
 /** Paged {@link CoordinationRequest} with page token. */
 public class PagedCoordinationRequest implements CoordinationRequest {
 
+    // Preserve the computed UID of the original three-field request for rolling upgrades.
+    private static final long serialVersionUID = 7230230030925988974L;
+
     private final byte[] content;
     private final String requestId;
     private final @Nullable Integer pageToken;
+    private final boolean streamingResponse;
 
     public PagedCoordinationRequest(byte[] content, String requestId, @Nullable Integer pageToken) {
+        this(content, requestId, pageToken, false);
+    }
+
+    public PagedCoordinationRequest(
+            byte[] content,
+            String requestId,
+            @Nullable Integer pageToken,
+            boolean streamingResponse) {
         this.content = content;
         this.requestId = requestId;
         this.pageToken = pageToken;
+        this.streamingResponse = streamingResponse;
+    }
+
+    public boolean streamingResponse() {
+        return streamingResponse;
     }
 
     public byte[] content() {

@@ -42,6 +42,9 @@ import org.apache.paimon.utils.CommitIncrement;
 import org.apache.paimon.utils.FieldsComparator;
 import org.apache.paimon.utils.RecordWriter;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import javax.annotation.Nullable;
 
 import java.util.ArrayList;
@@ -56,6 +59,8 @@ import java.util.stream.Collectors;
 
 /** A {@link RecordWriter} to write records and generate {@link CompactIncrement}. */
 public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
+
+    private static final Logger LOG = LoggerFactory.getLogger(MergeTreeWriter.class);
 
     private final boolean writeBufferSpillable;
     private final MemorySize maxDiskSize;
@@ -72,6 +77,28 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
     private final boolean commitForceCompact;
     private final ChangelogProducer changelogProducer;
     @Nullable private final FieldsComparator userDefinedSeqComparator;
+    private final String writerLogContext;
+
+    private long recordsWritten;
+    private long putNanos;
+    private long flushCalls;
+    private long flushTriggeredByWriteCalls;
+    private long flushTriggeredByMemoryCalls;
+    private long flushTriggeredByCompactCalls;
+    private long flushTriggeredByPrepareCommitCalls;
+    private long flushNanos;
+    private long maxFlushNanos;
+    private long flushRecords;
+    private long maxFlushRecords;
+    private long forEachNanos;
+    private long clearNanos;
+    private long changelogCloseNanos;
+    private long dataCloseNanos;
+    private long collectResultsNanos;
+    private long syncLatestCompactionNanos;
+    private long triggerCompactionNanos;
+    private long prepareCommitCalls;
+    private long prepareCommitNanos;
 
     private final LinkedHashSet<DataFileMeta> newFiles;
     private final LinkedHashSet<DataFileMeta> deletedFiles;
@@ -84,6 +111,7 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
 
     private long newSequenceNumber;
     private WriteBuffer writeBuffer;
+    private String writeBufferType = "<not-initialized>";
 
     public MergeTreeWriter(
             boolean writeBufferSpillable,
@@ -99,7 +127,8 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
             boolean commitForceCompact,
             ChangelogProducer changelogProducer,
             @Nullable CommitIncrement increment,
-            @Nullable FieldsComparator userDefinedSeqComparator) {
+            @Nullable FieldsComparator userDefinedSeqComparator,
+            String writerLogContext) {
         this.writeBufferSpillable = writeBufferSpillable;
         this.maxDiskSize = maxDiskSize;
         this.sortMaxFan = sortMaxFan;
@@ -115,6 +144,7 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
         this.commitForceCompact = commitForceCompact;
         this.changelogProducer = changelogProducer;
         this.userDefinedSeqComparator = userDefinedSeqComparator;
+        this.writerLogContext = writerLogContext;
 
         this.newFiles = new LinkedHashSet<>();
         this.deletedFiles = new LinkedHashSet<>();
@@ -147,7 +177,7 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
 
     @Override
     public void setMemoryPool(MemorySegmentPool memoryPool) {
-        this.writeBuffer =
+        SortBufferWriteBuffer sortBufferWriteBuffer =
                 new SortBufferWriteBuffer(
                         keyType,
                         valueType,
@@ -158,23 +188,43 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
                         sortMaxFan,
                         sortCompression,
                         ioManager);
+        this.writeBuffer = sortBufferWriteBuffer;
+        this.writeBufferType = sortBufferWriteBuffer.bufferType();
+        LOG.info(
+                "Paimon merge tree writer buffer initialized: {}, writeBufferType={}, "
+                        + "writeBufferSpillable={}, ioManagerConfigured={}, maxDiskSize={}, "
+                        + "sortMaxFan={}, sortCompression={}",
+                writerLogContext,
+                writeBufferType,
+                writeBufferSpillable,
+                ioManager != null,
+                maxDiskSize,
+                sortMaxFan,
+                sortCompression);
     }
 
     @Override
     public void write(KeyValue kv) throws Exception {
         long sequenceNumber = newSequenceNumber();
+        long putStartNanos = System.nanoTime();
         boolean success = writeBuffer.put(sequenceNumber, kv.valueKind(), kv.key(), kv.value());
+        putNanos += elapsedNanos(putStartNanos);
         if (!success) {
+            flushTriggeredByWriteCalls++;
             flushWriteBuffer(false, false);
+            putStartNanos = System.nanoTime();
             success = writeBuffer.put(sequenceNumber, kv.valueKind(), kv.key(), kv.value());
+            putNanos += elapsedNanos(putStartNanos);
             if (!success) {
                 throw new RuntimeException("Mem table is too small to hold a single element.");
             }
         }
+        recordsWritten++;
     }
 
     @Override
     public void compact(boolean fullCompaction) throws Exception {
+        flushTriggeredByCompactCalls++;
         flushWriteBuffer(true, fullCompaction);
     }
 
@@ -202,13 +252,19 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
     public void flushMemory() throws Exception {
         boolean success = writeBuffer.flushMemory();
         if (!success) {
+            flushTriggeredByMemoryCalls++;
             flushWriteBuffer(false, false);
         }
     }
 
     private void flushWriteBuffer(boolean waitForLatestCompaction, boolean forcedFullCompaction)
             throws Exception {
-        if (writeBuffer.size() > 0) {
+        long flushStartNanos = System.nanoTime();
+        int bufferSize = writeBuffer.size();
+        if (bufferSize > 0) {
+            flushCalls++;
+            flushRecords += bufferSize;
+            maxFlushRecords = Math.max(maxFlushRecords, bufferSize);
             if (compactManager.shouldWaitForLatestCompaction()) {
                 waitForLatestCompaction = true;
             }
@@ -221,19 +277,28 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
                     writerFactory.createRollingMergeTreeFileWriter(0, FileSource.APPEND);
 
             try {
+                long forEachStartNanos = System.nanoTime();
                 writeBuffer.forEach(
                         keyComparator,
                         mergeFunction,
                         changelogWriter == null ? null : changelogWriter::write,
                         dataWriter::write);
+                forEachNanos += elapsedNanos(forEachStartNanos);
             } finally {
+                long clearStartNanos = System.nanoTime();
                 writeBuffer.clear();
+                clearNanos += elapsedNanos(clearStartNanos);
                 if (changelogWriter != null) {
+                    long changelogCloseStartNanos = System.nanoTime();
                     changelogWriter.close();
+                    changelogCloseNanos += elapsedNanos(changelogCloseStartNanos);
                 }
+                long dataCloseStartNanos = System.nanoTime();
                 dataWriter.close();
+                dataCloseNanos += elapsedNanos(dataCloseStartNanos);
             }
 
+            long collectResultsStartNanos = System.nanoTime();
             if (changelogWriter != null) {
                 newFilesChangelog.addAll(changelogWriter.result());
             }
@@ -242,14 +307,24 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
                 newFiles.add(fileMeta);
                 compactManager.addNewFile(fileMeta);
             }
+            collectResultsNanos += elapsedNanos(collectResultsStartNanos);
         }
 
+        long syncStartNanos = System.nanoTime();
         trySyncLatestCompaction(waitForLatestCompaction);
+        syncLatestCompactionNanos += elapsedNanos(syncStartNanos);
+        long triggerCompactionStartNanos = System.nanoTime();
         compactManager.triggerCompaction(forcedFullCompaction);
+        triggerCompactionNanos += elapsedNanos(triggerCompactionStartNanos);
+        long flushNanos = elapsedNanos(flushStartNanos);
+        this.flushNanos += flushNanos;
+        this.maxFlushNanos = Math.max(this.maxFlushNanos, flushNanos);
     }
 
     @Override
     public CommitIncrement prepareCommit(boolean waitCompaction) throws Exception {
+        long prepareCommitStartNanos = System.nanoTime();
+        flushTriggeredByPrepareCommitCalls++;
         flushWriteBuffer(waitCompaction, false);
         if (commitForceCompact) {
             waitCompaction = true;
@@ -262,8 +337,14 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
         if (compactManager.shouldWaitForPreparingCheckpoint()) {
             waitCompaction = true;
         }
+        long syncStartNanos = System.nanoTime();
         trySyncLatestCompaction(waitCompaction);
-        return drainIncrement();
+        syncLatestCompactionNanos += elapsedNanos(syncStartNanos);
+        CommitIncrement increment = drainIncrement();
+        prepareCommitCalls++;
+        prepareCommitNanos += elapsedNanos(prepareCommitStartNanos);
+        logInternalStats(waitCompaction, increment);
+        return increment;
     }
 
     @Override
@@ -275,6 +356,70 @@ public class MergeTreeWriter implements RecordWriter<KeyValue>, MemoryOwner {
     @Override
     public void sync() throws Exception {
         trySyncLatestCompaction(true);
+    }
+
+    private void logInternalStats(boolean waitCompaction, CommitIncrement increment) {
+        DataIncrement newFilesIncrement = increment.newFilesIncrement();
+        CompactIncrement compactIncrement = increment.compactIncrement();
+        LOG.info(
+                "Paimon merge tree writer stats: {}, writeBufferType={}, recordsWritten={}, putMs={}, "
+                        + "flushCalls={}, flushByWrite={}, flushByMemory={}, flushByCompact={}, "
+                        + "flushByPrepareCommit={}, flushRecords={}, maxFlushRecords={}, flushMs={}, "
+                        + "maxFlushMs={}, forEachMs={}, clearMs={}, changelogCloseMs={}, "
+                        + "dataCloseMs={}, collectResultsMs={}, syncLatestCompactionMs={}, "
+                        + "triggerCompactionMs={}, prepareCommitCalls={}, prepareCommitMs={}, "
+                        + "waitCompaction={}, newFiles={}, newBytes={}, compactBeforeFiles={}, "
+                        + "compactBeforeBytes={}, compactAfterFiles={}, compactAfterBytes={}, "
+                        + "changelogFiles={}, changelogBytes={}",
+                writerLogContext,
+                writeBufferType,
+                recordsWritten,
+                toMillis(putNanos),
+                flushCalls,
+                flushTriggeredByWriteCalls,
+                flushTriggeredByMemoryCalls,
+                flushTriggeredByCompactCalls,
+                flushTriggeredByPrepareCommitCalls,
+                flushRecords,
+                maxFlushRecords,
+                toMillis(flushNanos),
+                toMillis(maxFlushNanos),
+                toMillis(forEachNanos),
+                toMillis(clearNanos),
+                toMillis(changelogCloseNanos),
+                toMillis(dataCloseNanos),
+                toMillis(collectResultsNanos),
+                toMillis(syncLatestCompactionNanos),
+                toMillis(triggerCompactionNanos),
+                prepareCommitCalls,
+                toMillis(prepareCommitNanos),
+                waitCompaction,
+                newFilesIncrement.newFiles().size(),
+                fileSize(newFilesIncrement.newFiles()),
+                compactIncrement.compactBefore().size(),
+                fileSize(compactIncrement.compactBefore()),
+                compactIncrement.compactAfter().size(),
+                fileSize(compactIncrement.compactAfter()),
+                newFilesIncrement.changelogFiles().size()
+                        + compactIncrement.changelogFiles().size(),
+                fileSize(newFilesIncrement.changelogFiles())
+                        + fileSize(compactIncrement.changelogFiles()));
+    }
+
+    private static long elapsedNanos(long startNanos) {
+        return System.nanoTime() - startNanos;
+    }
+
+    private static long toMillis(long nanos) {
+        return nanos / 1_000_000;
+    }
+
+    private static long fileSize(List<DataFileMeta> files) {
+        long fileSize = 0L;
+        for (DataFileMeta file : files) {
+            fileSize += file.fileSize();
+        }
+        return fileSize;
     }
 
     private CommitIncrement drainIncrement() {

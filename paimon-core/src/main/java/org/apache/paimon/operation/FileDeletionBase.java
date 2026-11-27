@@ -141,7 +141,10 @@ public abstract class FileDeletionBase<T extends Snapshot> {
             for (Integer bucket : entry.getValue()) {
                 toDeleteEmptyDirectory.add(pathFactory.bucketPath(entry.getKey(), bucket));
             }
-            deleteFiles(toDeleteEmptyDirectory, this::tryDeleteEmptyDirectory);
+            deleteFiles(
+                    "empty-directory-delete",
+                    toDeleteEmptyDirectory,
+                    this::tryDeleteEmptyDirectory);
 
             List<Path> hierarchicalPaths = pathFactory.getHierarchicalPartitionPath(entry.getKey());
             int hierarchies = hierarchicalPaths.size();
@@ -173,26 +176,44 @@ public abstract class FileDeletionBase<T extends Snapshot> {
     }
 
     public void cleanUnusedDataFiles(String manifestList, Predicate<ExpireFileEntry> skipper) {
-        // try read manifests
-        List<ManifestFileMeta> manifests = tryReadManifestList(manifestList);
-        List<ExpireFileEntry> manifestEntries;
-        // data file path -> (original manifest entry, extra file paths)
-        Map<Path, Pair<ExpireFileEntry, List<Path>>> dataFileToDelete = new HashMap<>();
-        for (ManifestFileMeta manifest : manifests) {
-            try {
-                manifestEntries =
-                        manifestFile.readExpireFileEntries(
-                                manifest.fileName(), manifest.fileSize());
-            } catch (Exception e) {
-                // cancel deletion if any exception occurs
-                LOG.warn("Failed to read some manifest files. Cancel deletion.", e);
-                return;
+        try (MaintenanceProgress progress =
+                new MaintenanceProgress(
+                        "operation=expire-files table="
+                                + pathFactory.root()
+                                + " manifest_list="
+                                + manifestList,
+                        "read-manifests")) {
+
+            // try read manifests
+            List<ManifestFileMeta> manifests = tryReadManifestList(manifestList);
+            List<ExpireFileEntry> manifestEntries;
+            // data file path -> (original manifest entry, extra file paths)
+            Map<Path, Pair<ExpireFileEntry, List<Path>>> dataFileToDelete = new HashMap<>();
+            progress.add("manifests_total", manifests.size());
+            for (ManifestFileMeta manifest : manifests) {
+                long item = progress.startItem(manifest.fileName());
+                try {
+                    manifestEntries =
+                            manifestFile.readExpireFileEntries(
+                                    manifest.fileName(), manifest.fileSize());
+                } catch (Exception e) {
+                    // cancel deletion if any exception occurs
+                    LOG.warn("Failed to read some manifest files. Cancel deletion.", e);
+                    return;
+                }
+
+                progress.finishItem(item);
+                progress.add("manifests_read", 1);
+                progress.add("manifest_entries_read", manifestEntries.size());
+                getDataFileToDelete(dataFileToDelete, manifestEntries);
             }
 
-            getDataFileToDelete(dataFileToDelete, manifestEntries);
-        }
+            progress.add("candidate_data_files", dataFileToDelete.size());
+            progress.phase("filter-and-delete-data-files");
+            doCleanUnusedDataFile(dataFileToDelete, skipper);
 
-        doCleanUnusedDataFile(dataFileToDelete, skipper);
+            progress.complete();
+        }
     }
 
     protected void doCleanUnusedDataFile(
@@ -211,7 +232,7 @@ public abstract class FileDeletionBase<T extends Snapshot> {
                         recordDeletionBuckets(entry);
                     }
                 });
-        deleteFiles(actualDataFileToDelete, fileIO::deleteQuietly);
+        deleteFiles("data-and-extra-file-delete", actualDataFileToDelete, fileIO::deleteQuietly);
     }
 
     protected void getDataFileToDelete(
@@ -273,7 +294,7 @@ public abstract class FileDeletionBase<T extends Snapshot> {
                 recordDeletionBuckets(entry);
             }
         }
-        deleteFiles(dataFileToDelete, fileIO::deleteQuietly);
+        deleteFiles("added-data-file-delete", dataFileToDelete, fileIO::deleteQuietly);
     }
 
     public void cleanUnusedStatisticsManifests(Snapshot snapshot, Set<String> skippingSet) {
@@ -298,7 +319,8 @@ public abstract class FileDeletionBase<T extends Snapshot> {
             }
             indexManifestEntries.removeIf(
                     entry -> skippingSet.contains(entry.indexFile().fileName()));
-            deleteFiles(indexManifestEntries, indexFileHandler::deleteIndexFile);
+            deleteFiles(
+                    "index-file-delete", indexManifestEntries, indexFileHandler::deleteIndexFile);
 
             if (!skippingSet.contains(indexManifest)) {
                 indexFileHandler.deleteManifest(indexManifest);
@@ -321,7 +343,7 @@ public abstract class FileDeletionBase<T extends Snapshot> {
             toDeleteManifests.add(manifestName);
         }
 
-        deleteFiles(toDeleteManifests, manifestFile::delete);
+        deleteFiles("manifest-file-delete", toDeleteManifests, manifestFile::delete);
     }
 
     protected void cleanUnusedManifests(
@@ -454,20 +476,54 @@ public abstract class FileDeletionBase<T extends Snapshot> {
     }
 
     protected <F> void deleteFiles(Collection<F> files, Consumer<F> deletion) {
+        deleteFiles("delete-batch", files, deletion);
+    }
+
+    private <F> void deleteFiles(String phase, Collection<F> files, Consumer<F> deletion) {
         if (files.isEmpty()) {
             return;
         }
 
-        List<CompletableFuture<Void>> deletionFutures = new ArrayList<>(files.size());
-        for (F file : files) {
-            deletionFutures.add(
-                    CompletableFuture.runAsync(() -> deletion.accept(file), deleteFileExecutor));
-        }
-
-        try {
-            CompletableFuture.allOf(deletionFutures.toArray(new CompletableFuture[0])).get();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
+        try (MaintenanceProgress progress =
+                new MaintenanceProgress(
+                        "operation=file-deletion table=" + pathFactory.root(), phase)) {
+            progress.add("total_calls", files.size());
+            List<CompletableFuture<Void>> deletionFutures = new ArrayList<>(files.size());
+            for (F file : files) {
+                progress.add("submitted_calls", 1);
+                progress.add("queued_calls", 1);
+                deletionFutures.add(
+                        CompletableFuture.runAsync(
+                                () -> {
+                                    long item = progress.startItem(String.valueOf(file));
+                                    progress.add("queued_calls", -1);
+                                    progress.add("started_calls", 1);
+                                    try {
+                                        deletion.accept(file);
+                                        // Quiet deletion APIs may hide failures; this is not a
+                                        // success count.
+                                        progress.add("delete_calls_completed", 1);
+                                    } catch (RuntimeException | Error e) {
+                                        progress.add("visible_failures", 1);
+                                        LOG.warn(
+                                                "Deletion call failed for {} in table {}",
+                                                file,
+                                                pathFactory.root(),
+                                                e);
+                                        throw e;
+                                    } finally {
+                                        progress.finishItem(item);
+                                    }
+                                },
+                                deleteFileExecutor));
+            }
+            try {
+                CompletableFuture.allOf(deletionFutures.toArray(new CompletableFuture[0])).get();
+                progress.complete();
+            } catch (Exception e) {
+                LOG.warn("Deletion batch aborted for table {}", pathFactory.root(), e);
+                throw new RuntimeException(e);
+            }
         }
     }
 }

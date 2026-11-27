@@ -29,6 +29,7 @@ import org.apache.paimon.flink.sorter.TableSortInfo;
 import org.apache.paimon.flink.sorter.TableSorter;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
+import org.apache.paimon.table.OverwriteFileStoreTable;
 import org.apache.paimon.table.Table;
 import org.apache.paimon.table.sink.ChannelComputer;
 
@@ -268,12 +269,22 @@ public class FlinkSinkBuilder {
                             + " then the parallelism of writerOperator will be set to bucketNums.");
             parallelism = bucketNums;
         }
+        // When overwriting a specific partition on a partitioned fixed-bucket table, wrap the
+        // table in OverwriteFileStoreTable so that createRowKeyExtractor() uses the new schema
+        // bucket count for row routing, instead of loading the old per-partition bucket
+        // mapping from the manifest. Without this, rows are hashed into the old bucket range
+        // (e.g. [0,1] for 2 buckets) but files are stamped with the new totalBuckets (e.g. 4),
+        // causing primary-key duplicates when the same key is later upserted under the new
+        // routing and both files are read together.
+        FileStoreTable sinkTable =
+                overwritePartition != null ? new OverwriteFileStoreTable(table) : table;
         DataStream<InternalRow> partitioned =
                 partition(
                         input,
-                        new RowDataChannelComputer(table.schema(), logSinkFunction != null),
+                        new RowDataChannelComputer(
+                                logSinkFunction != null, sinkTable.createRowKeyExtractor()),
                         parallelism);
-        FixedBucketSink sink = new FixedBucketSink(table, overwritePartition, logSinkFunction);
+        FixedBucketSink sink = new FixedBucketSink(sinkTable, overwritePartition, logSinkFunction);
         return sink.sinkFrom(partitioned);
     }
 

@@ -18,8 +18,7 @@
 
 package org.apache.paimon.benchmark;
 
-import org.apache.paimon.shade.org.apache.commons.lang3.StringUtils;
-import org.apache.paimon.shade.org.apache.commons.lang3.SystemUtils;
+import org.apache.commons.lang3.SystemUtils;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -114,7 +113,7 @@ public class Benchmark {
 
             if (outputPerIteration) {
                 System.out.println(
-                        "Iteration " + iter + " took " + runTime / 1000 + " microseconds");
+                        "Iteration " + iter + " took " + runTime / 1000000 + " microseconds");
             }
         }
         System.out.println(
@@ -161,24 +160,18 @@ public class Benchmark {
     private String getProcessorName() {
         if (SystemUtils.IS_OS_MAC_OSX) {
             try {
-                return StringUtils.stripEnd(
-                        executeAndGetOutput(
-                                new String[] {
-                                    "/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"
-                                }),
-                        null);
+                return executeAndGetOutput(
+                                new String[] {"/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"})
+                        .trim();
             } catch (Throwable e) {
                 return "Unknown processor";
             }
         } else if (SystemUtils.IS_OS_LINUX) {
             try {
-                String grepPath =
-                        StringUtils.stripEnd(
-                                executeAndGetOutput(new String[] {"which", "grep"}), null);
-                return StringUtils.stripEnd(
-                        executeAndGetOutput(
-                                new String[] {grepPath, "-m", "1", "model name", "/proc/cpuinfo"}),
-                        null);
+                String grepPath = executeAndGetOutput(new String[] {"which", "grep"}).trim();
+                return executeAndGetOutput(
+                                new String[] {grepPath, "-m", "1", "model name", "/proc/cpuinfo"})
+                        .trim();
             } catch (Throwable t) {
                 return "Unknown processor";
             }

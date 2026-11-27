@@ -28,6 +28,7 @@ import org.apache.paimon.fs.Path;
 import org.apache.paimon.manifest.ManifestEntry;
 import org.apache.paimon.manifest.ManifestFile;
 import org.apache.paimon.operation.CleanOrphanFilesResult;
+import org.apache.paimon.operation.MaintenanceProgress;
 import org.apache.paimon.operation.OrphanFilesClean;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
@@ -153,8 +154,20 @@ public class FlinkOrphanFilesClean extends OrphanFilesClean {
                                                     ctx,
                                             Collector<Tuple2<String, String>> out)
                                             throws Exception {
-                                        for (Snapshot snapshot : safelyGetAllSnapshots(branch)) {
-                                            out.collect(new Tuple2<>(branch, snapshot.toJson()));
+                                        try (MaintenanceProgress progress =
+                                                new MaintenanceProgress(
+                                                        "operation=remove-orphans table="
+                                                                + location
+                                                                + " branch="
+                                                                + branch,
+                                                        "enumerate-snapshots-tags-changelogs")) {
+                                            for (Snapshot snapshot :
+                                                    safelyGetAllSnapshots(branch)) {
+                                                out.collect(
+                                                        new Tuple2<>(branch, snapshot.toJson()));
+                                                progress.add("snapshot_references_emitted", 1);
+                                            }
+                                            progress.complete();
                                         }
                                     }
                                 })
@@ -177,8 +190,22 @@ public class FlinkOrphanFilesClean extends OrphanFilesClean {
                                                             new Tuple2<>(branch, manifest);
                                                     ctx.output(manifestOutputTag, tuple2);
                                                 };
-                                        collectWithoutDataFile(
-                                                branch, snapshot, out::collect, manifestConsumer);
+                                        try (MaintenanceProgress progress =
+                                                new MaintenanceProgress(
+                                                        "operation=remove-orphans table="
+                                                                + location
+                                                                + " branch="
+                                                                + branch
+                                                                + " snapshot="
+                                                                + snapshot.id(),
+                                                        "read-snapshot-manifest-lists")) {
+                                            collectWithoutDataFile(
+                                                    branch,
+                                                    snapshot,
+                                                    out::collect,
+                                                    manifestConsumer);
+                                            progress.complete();
+                                        }
                                     }
                                 });
 
@@ -202,34 +229,74 @@ public class FlinkOrphanFilesClean extends OrphanFilesClean {
 
                                     @Override
                                     public void endInput() throws IOException {
-                                        Map<String, ManifestFile> branchManifests = new HashMap<>();
-                                        for (Tuple2<String, String> tuple2 : manifests) {
-                                            ManifestFile manifestFile =
-                                                    branchManifests.computeIfAbsent(
-                                                            tuple2.f0,
-                                                            key ->
-                                                                    table.switchToBranch(key)
-                                                                            .store()
-                                                                            .manifestFileFactory()
-                                                                            .create());
-                                            retryReadingFiles(
-                                                            () ->
-                                                                    manifestFile
-                                                                            .readWithIOException(
-                                                                                    tuple2.f1),
-                                                            Collections.<ManifestEntry>emptyList())
-                                                    .forEach(
-                                                            f -> {
-                                                                List<String> files =
-                                                                        new ArrayList<>();
-                                                                files.add(f.fileName());
-                                                                files.addAll(f.file().extraFiles());
-                                                                files.forEach(
-                                                                        file ->
-                                                                                output.collect(
-                                                                                        new StreamRecord<>(
-                                                                                                file)));
-                                                            });
+                                        try (MaintenanceProgress progress =
+                                                new MaintenanceProgress(
+                                                        "operation=remove-orphans table="
+                                                                + location
+                                                                + " task="
+                                                                + getRuntimeContext()
+                                                                        .getTaskNameWithSubtasks()
+                                                                + " attempt="
+                                                                + getRuntimeContext()
+                                                                        .getAttemptNumber(),
+                                                        "read-data-manifests")) {
+                                            progress.add("manifests_total", manifests.size());
+
+                                            Map<String, ManifestFile> branchManifests =
+                                                    new HashMap<>();
+                                            for (Tuple2<String, String> tuple2 : manifests) {
+                                                long item =
+                                                        progress.startItem(
+                                                                "read-manifest branch="
+                                                                        + tuple2.f0
+                                                                        + " manifest="
+                                                                        + tuple2.f1);
+                                                ManifestFile manifestFile =
+                                                        branchManifests.computeIfAbsent(
+                                                                tuple2.f0,
+                                                                key ->
+                                                                        table.switchToBranch(key)
+                                                                                .store()
+                                                                                .manifestFileFactory()
+                                                                                .create());
+                                                List<ManifestEntry> entries =
+                                                        retryReadingFiles(
+                                                                () ->
+                                                                        manifestFile
+                                                                                .readWithIOException(
+                                                                                        tuple2.f1),
+                                                                Collections
+                                                                        .<ManifestEntry>
+                                                                                emptyList());
+                                                progress.finishItem(item);
+                                                progress.add("manifests_read", 1);
+                                                progress.add(
+                                                        "manifest_entries_read", entries.size());
+                                                long emitItem =
+                                                        progress.startItem(
+                                                                "emit-references branch="
+                                                                        + tuple2.f0
+                                                                        + " manifest="
+                                                                        + tuple2.f1);
+                                                entries.forEach(
+                                                        f -> {
+                                                            List<String> files = new ArrayList<>();
+                                                            files.add(f.fileName());
+                                                            files.addAll(f.file().extraFiles());
+                                                            files.forEach(
+                                                                    file -> {
+                                                                        output.collect(
+                                                                                new StreamRecord<>(
+                                                                                        file));
+                                                                        progress.add(
+                                                                                "references_emitted",
+                                                                                1);
+                                                                    });
+                                                        });
+                                                progress.finishItem(emitItem);
+                                            }
+
+                                            progress.complete();
                                         }
                                     }
                                 });
@@ -261,6 +328,37 @@ public class FlinkOrphanFilesClean extends OrphanFilesClean {
                                 new BoundedTwoInputOperator<
                                         String, Tuple2<String, Long>, CleanOrphanFilesResult>() {
 
+                                    private transient MaintenanceProgress progress;
+
+                                    @Override
+                                    public void open() throws Exception {
+                                        super.open();
+                                        progress =
+                                                new MaintenanceProgress(
+                                                        "operation=remove-orphans table="
+                                                                + location
+                                                                + " dry_run="
+                                                                + dryRun
+                                                                + " task="
+                                                                + getRuntimeContext()
+                                                                        .getTaskNameWithSubtasks()
+                                                                + " attempt="
+                                                                + getRuntimeContext()
+                                                                        .getAttemptNumber(),
+                                                        "build-referenced-file-set");
+                                    }
+
+                                    @Override
+                                    public void close() throws Exception {
+                                        try {
+                                            if (progress != null) {
+                                                progress.close();
+                                            }
+                                        } finally {
+                                            super.close();
+                                        }
+                                    }
+
                                     private boolean buildEnd;
                                     private long emittedFilesCount;
                                     private long emittedFilesLen;
@@ -279,12 +377,21 @@ public class FlinkOrphanFilesClean extends OrphanFilesClean {
                                         switch (inputId) {
                                             case 1:
                                                 checkState(!buildEnd, "Should not build ended.");
-                                                LOG.info("Finish build phase.");
+                                                LOG.info(
+                                                        "Finish build phase; table={} unique_references={}",
+                                                        location,
+                                                        used.size());
+                                                progress.phase("match-and-delete-candidates");
                                                 buildEnd = true;
                                                 break;
                                             case 2:
                                                 checkState(buildEnd, "Should build ended.");
-                                                LOG.info("Finish probe phase.");
+                                                progress.complete();
+                                                progress.close();
+                                                LOG.info(
+                                                        "Finish probe phase; table={} dry_run={}",
+                                                        location,
+                                                        dryRun);
                                                 LOG.info(
                                                         "Clean files count : {}",
                                                         emittedFilesCount);
@@ -300,7 +407,10 @@ public class FlinkOrphanFilesClean extends OrphanFilesClean {
 
                                     @Override
                                     public void processElement1(StreamRecord<String> element) {
-                                        used.add(element.getValue());
+                                        if (used.add(element.getValue())) {
+                                            progress.add("unique_references", 1);
+                                        }
+                                        progress.add("references_received", 1);
                                     }
 
                                     @Override
@@ -310,11 +420,25 @@ public class FlinkOrphanFilesClean extends OrphanFilesClean {
                                         Tuple2<String, Long> fileInfo = element.getValue();
                                         String value = fileInfo.f0;
                                         Path path = new Path(value);
+                                        progress.add("files_checked", 1);
                                         if (!used.contains(path.getName())) {
                                             emittedFilesCount++;
                                             emittedFilesLen += fileInfo.f1;
+                                            progress.add("candidate_files", 1);
+                                            progress.add("candidate_bytes", fileInfo.f1);
+                                            long item = progress.startItem(path.toString());
                                             cleanFile(path);
-                                            LOG.info("Dry clean: {}", path);
+                                            progress.finishItem(item);
+                                            progress.add(
+                                                    dryRun
+                                                            ? "dry_run_files"
+                                                            : "delete_calls_completed",
+                                                    1);
+                                            LOG.debug(
+                                                    "Orphan candidate handled: table={} dry_run={} path={}",
+                                                    location,
+                                                    dryRun,
+                                                    path);
                                         }
                                     }
                                 });
@@ -324,46 +448,61 @@ public class FlinkOrphanFilesClean extends OrphanFilesClean {
     }
 
     private void listPaimonFilesForTable(Collector<Tuple2<String, Long>> out) {
-        FileStorePathFactory pathFactory = table.store().pathFactory();
-        List<String> dirs =
-                listPaimonFileDirs(
-                                table.fullName(),
-                                pathFactory.manifestPath().toString(),
-                                pathFactory.indexPath().toString(),
-                                pathFactory.statisticsPath().toString(),
-                                pathFactory.dataFilePath().toString(),
-                                partitionKeysNum,
-                                table.coreOptions().dataFileExternalPaths())
-                        .stream()
-                        .map(Path::toUri)
-                        .map(Object::toString)
-                        .collect(Collectors.toList());
-        Set<Path> emptyDirs = new HashSet<>();
-        for (String dir : dirs) {
-            Path dirPath = new Path(dir);
-            List<FileStatus> files = tryBestListingDirs(dirPath);
-            for (FileStatus file : files) {
-                if (oldEnough(file)) {
-                    out.collect(new Tuple2<>(file.getPath().toUri().toString(), file.getLen()));
-                }
-            }
-            if (files.isEmpty()) {
-                emptyDirs.add(dirPath);
-            }
-        }
+        try (MaintenanceProgress progress =
+                new MaintenanceProgress(
+                        "operation=remove-orphans table=" + location, "discover-directories")) {
 
-        // delete empty dir
-        while (!emptyDirs.isEmpty()) {
-            Set<Path> newEmptyDir = new HashSet<>();
-            for (Path emptyDir : emptyDirs) {
-                try {
-                    fileIO.delete(emptyDir, false);
-                    // recursive cleaning
-                    newEmptyDir.add(emptyDir.getParent());
-                } catch (IOException ignored) {
+            FileStorePathFactory pathFactory = table.store().pathFactory();
+            List<String> dirs =
+                    listPaimonFileDirs(
+                                    table.fullName(),
+                                    pathFactory.manifestPath().toString(),
+                                    pathFactory.indexPath().toString(),
+                                    pathFactory.statisticsPath().toString(),
+                                    pathFactory.dataFilePath().toString(),
+                                    partitionKeysNum,
+                                    table.coreOptions().dataFileExternalPaths())
+                            .stream()
+                            .map(Path::toUri)
+                            .map(Object::toString)
+                            .collect(Collectors.toList());
+            progress.add("directories_total", dirs.size());
+            progress.phase("list-candidate-files");
+            Set<Path> emptyDirs = new HashSet<>();
+            for (String dir : dirs) {
+                Path dirPath = new Path(dir);
+                long item = progress.startItem(dir);
+                List<FileStatus> files = tryBestListingDirs(dirPath);
+                progress.add("files_listed", files.size());
+                for (FileStatus file : files) {
+                    if (oldEnough(file)) {
+                        out.collect(new Tuple2<>(file.getPath().toUri().toString(), file.getLen()));
+                        progress.add("candidates_emitted", 1);
+                    }
+                }
+                progress.finishItem(item);
+                progress.add("directories_listed", 1);
+                if (files.isEmpty()) {
+                    emptyDirs.add(dirPath);
                 }
             }
-            emptyDirs = newEmptyDir;
+
+            progress.phase("clean-empty-directories");
+            // delete empty dir
+            while (!emptyDirs.isEmpty()) {
+                Set<Path> newEmptyDir = new HashSet<>();
+                for (Path emptyDir : emptyDirs) {
+                    try {
+                        fileIO.delete(emptyDir, false);
+                        // recursive cleaning
+                        newEmptyDir.add(emptyDir.getParent());
+                    } catch (IOException ignored) {
+                    }
+                }
+                emptyDirs = newEmptyDir;
+            }
+
+            progress.complete();
         }
     }
 

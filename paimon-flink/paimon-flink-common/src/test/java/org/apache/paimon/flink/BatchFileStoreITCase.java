@@ -181,6 +181,36 @@ public class BatchFileStoreITCase extends CatalogITCaseBase {
                         Row.of(1, 11, 111), Row.of(2, 22, 222), Row.of(3, 33, 333));
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testWriteRestoreCoordinatorWithSpillAndSmallPages(boolean spill) throws Exception {
+        java.nio.file.Path spillDirectory = java.nio.file.Paths.get(path, "coordinator-spill");
+        batchSql(
+                "CREATE TABLE SPILL_PK (pt INT, a INT, b INT, "
+                        + "PRIMARY KEY (pt, a) NOT ENFORCED) PARTITIONED BY (pt) WITH ("
+                        + "'bucket' = '2', 'sink.writer-coordinator.enabled' = 'true', "
+                        + "'sink.writer-coordinator.prefetch-manifests' = 'false', "
+                        + "'sink.writer-coordinator.page-size' = '32 b', "
+                        + "'sink.writer-coordinator.spill-enabled' = '"
+                        + spill
+                        + "', "
+                        + "'sink.writer-coordinator.spill-directory' = '"
+                        + spillDirectory
+                        + "')");
+        // First job restores an empty table; subsequent jobs restore existing metadata.
+        batchSql("INSERT INTO SPILL_PK VALUES (1, 1, 10), (1, 2, 20), (2, 1, 30)");
+        batchSql("INSERT INTO SPILL_PK VALUES (1, 1, 11), (2, 1, 31), (2, 2, 40)");
+        assertThat(batchSql("SELECT * FROM SPILL_PK"))
+                .containsExactlyInAnyOrder(
+                        Row.of(1, 1, 11), Row.of(1, 2, 20), Row.of(2, 1, 31), Row.of(2, 2, 40));
+        if (java.nio.file.Files.exists(spillDirectory)) {
+            try (java.util.stream.Stream<java.nio.file.Path> files =
+                    java.nio.file.Files.list(spillDirectory)) {
+                assertThat(files.count()).isZero();
+            }
+        }
+    }
+
     @Test
     public void testWriteRestoreCoordinatorDv() {
         batchSql(

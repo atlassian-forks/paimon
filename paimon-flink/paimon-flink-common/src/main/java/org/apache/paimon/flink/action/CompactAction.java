@@ -24,6 +24,7 @@ import org.apache.paimon.compact.CompactUnit;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.InternalRow;
 import org.apache.paimon.flink.FlinkConnectorOptions;
+import org.apache.paimon.flink.FlinkConnectorOptions.CompactionBucketDistributionStrategy;
 import org.apache.paimon.flink.cluster.IncrementalClusterSplitSource;
 import org.apache.paimon.flink.cluster.RewriteIncrementalClusterCommittableOperator;
 import org.apache.paimon.flink.compact.AppendTableCompactBuilder;
@@ -51,6 +52,8 @@ import org.apache.paimon.predicate.PredicateProjectionConverter;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.CommitMessage;
+import org.apache.paimon.table.sink.FixedBucketRowKeyExtractor;
+import org.apache.paimon.table.sink.PartitionBucketMapping;
 import org.apache.paimon.table.source.DataSplit;
 import org.apache.paimon.types.RowType;
 import org.apache.paimon.utils.InternalRowPartitionComputer;
@@ -165,6 +168,20 @@ public class CompactAction extends TableActionBase {
         }
     }
 
+    static CompactionBucketDistributionStrategy compactionBucketDistributionStrategy(
+            FileStoreTable table, boolean fullCompaction, boolean isStreaming) {
+        return compactionBucketDistributionStrategy(
+                table.coreOptions().toConfiguration(), fullCompaction, isStreaming);
+    }
+
+    static CompactionBucketDistributionStrategy compactionBucketDistributionStrategy(
+            Options options, boolean fullCompaction, boolean isStreaming) {
+        if (!fullCompaction || isStreaming) {
+            return CompactionBucketDistributionStrategy.LINEAR;
+        }
+        return options.get(FlinkConnectorOptions.COMPACTION_BUCKET_DISTRIBUTION_STRATEGY);
+    }
+
     private void buildForBucketedTableCompact(
             StreamExecutionEnvironment env, FileStoreTable table, boolean isStreaming)
             throws Exception {
@@ -187,9 +204,14 @@ public class CompactAction extends TableActionBase {
                     };
             table = table.copy(dynamicOptions);
         }
+        CompactionBucketDistributionStrategy bucketDistributionStrategy =
+                compactionBucketDistributionStrategy(table, fullCompaction, isStreaming);
         CompactorSourceBuilder sourceBuilder =
-                new CompactorSourceBuilder(identifier.getFullName(), table);
-        CompactorSinkBuilder sinkBuilder = new CompactorSinkBuilder(table, fullCompaction);
+                new CompactorSourceBuilder(identifier.getFullName(), table)
+                        .withBucketDistributionStrategy(bucketDistributionStrategy);
+        CompactorSinkBuilder sinkBuilder =
+                new CompactorSinkBuilder(table, fullCompaction)
+                        .withBucketDistributionStrategy(bucketDistributionStrategy);
 
         sourceBuilder.withPartitionPredicate(getPartitionPredicate());
         DataStreamSource<RowData> source =
@@ -426,7 +448,7 @@ public class CompactAction extends TableActionBase {
         String commitUser = CoreOptions.createCommitUser(options);
         List<DataStream<Committable>> dataStreams = new ArrayList<>();
         for (BinaryRow partition : partitions) {
-            int bucketNum = defaultBucketNum;
+            int partitionBucketNum = defaultBucketNum;
 
             Iterator<ManifestEntry> it =
                     table.newSnapshotReader()
@@ -434,11 +456,11 @@ public class CompactAction extends TableActionBase {
                             .onlyReadRealBuckets()
                             .readFileIterator();
             if (it.hasNext()) {
-                bucketNum = it.next().totalBuckets();
+                partitionBucketNum = it.next().totalBuckets();
             }
 
             bucketOptions = new HashMap<>(table.options());
-            bucketOptions.put(CoreOptions.BUCKET.key(), String.valueOf(bucketNum));
+            bucketOptions.put(CoreOptions.BUCKET.key(), String.valueOf(partitionBucketNum));
             FileStoreTable realTable = table.copy(table.schema().copy(bucketOptions));
 
             LinkedHashMap<String, String> partitionSpec =
@@ -450,11 +472,16 @@ public class CompactAction extends TableActionBase {
                             partitionSpec,
                             options.get(FlinkConnectorOptions.SCAN_PARALLELISM));
 
+            PartitionBucketMapping partitionBucketMapping =
+                    new PartitionBucketMapping(partitionBucketNum);
+            FixedBucketRowKeyExtractor extractor =
+                    new FixedBucketRowKeyExtractor(realTable.schema(), partitionBucketMapping);
+
             DataStream<InternalRow> partitioned =
                     FlinkStreamPartitioner.partition(
                             FlinkSinkBuilder.mapToInternalRow(
                                     sourcePair.getLeft(), realTable.rowType()),
-                            new RowDataChannelComputer(realTable.schema(), false),
+                            new RowDataChannelComputer(false, extractor),
                             null);
             FixedBucketSink sink = new FixedBucketSink(realTable, null, null);
             DataStream<Committable> written =

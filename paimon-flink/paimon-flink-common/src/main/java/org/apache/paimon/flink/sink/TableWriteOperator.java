@@ -221,7 +221,9 @@ public abstract class TableWriteOperator<IN> extends PrepareCommitOperator<IN, C
                             .getEnvironment()
                             .getOperatorCoordinatorEventGateway();
             TableWriteOperator<IN> operator = createStreamOperatorImpl(parameters);
-            operator.setWriteRestore(new CoordinatedWriteRestore(gateway, operatorID));
+            operator.setWriteRestore(
+                    CoordinatedWriteRestore.fromTableOptions(
+                            gateway, operatorID, table.coreOptions().toConfiguration()));
             return (T) operator;
         }
 
