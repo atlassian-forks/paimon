@@ -670,7 +670,7 @@ public abstract class AbstractFileStoreWrite<T> implements FileStoreWrite<T> {
             boolean waitCompaction,
             long commitIdentifier,
             boolean emptyCommit) {
-        LOG.info(
+        LOG.warn(
                 "Paimon writer bucket stats: stage={}, table={}, partition={}, bucket={}, "
                         + "totalBuckets={}, baseSnapshotId={}, commitIdentifier={}, waitCompaction={}, "
                         + "emptyCommit={}, recordsWritten={}, writeMs={}, avgWriteMicros={}, "
