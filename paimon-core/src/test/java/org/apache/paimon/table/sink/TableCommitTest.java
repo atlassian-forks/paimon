@@ -23,6 +23,7 @@ import org.apache.paimon.Snapshot;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.fs.Path;
+import org.apache.paimon.fs.SeekableInputStream;
 import org.apache.paimon.fs.local.LocalFileIO;
 import org.apache.paimon.io.CompactIncrement;
 import org.apache.paimon.io.DataFileMeta;
@@ -32,6 +33,7 @@ import org.apache.paimon.manifest.IndexManifestEntry;
 import org.apache.paimon.manifest.ManifestCommittable;
 import org.apache.paimon.manifest.ManifestEntry;
 import org.apache.paimon.manifest.SimpleFileEntry;
+import org.apache.paimon.operation.FileStoreCommit;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaManager;
@@ -50,7 +52,11 @@ import org.apache.paimon.utils.SnapshotManager;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -75,6 +81,86 @@ public class TableCommitTest {
     @TempDir java.nio.file.Path tempDir;
 
     private static final Map<String, Set<Long>> commitCallbackResult = new ConcurrentHashMap<>();
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testFilterCommittedBoundsSnapshotReadsAndPreservesRetry(boolean strictMode)
+            throws Exception {
+        List<String> snapshotReads = new ArrayList<>();
+        LocalFileIO fileIO =
+                new LocalFileIO() {
+                    @Override
+                    public SeekableInputStream newInputStream(Path path) throws IOException {
+                        if (path.getName().startsWith("snapshot-")) {
+                            snapshotReads.add(path.getName());
+                        }
+                        return super.newInputStream(path);
+                    }
+                };
+        Path path = new Path(tempDir.toString());
+        RowType rowType =
+                RowType.of(
+                        new DataType[] {DataTypes.INT(), DataTypes.BIGINT()},
+                        new String[] {"k", "v"});
+        Options options = new Options();
+        options.set(CoreOptions.PATH, path.toString());
+        options.set(CoreOptions.BUCKET, 1);
+        TableSchema schema =
+                SchemaUtils.forceCommit(
+                        new SchemaManager(fileIO, path),
+                        new Schema(
+                                rowType.getFields(),
+                                Collections.emptyList(),
+                                Collections.singletonList("k"),
+                                options.toMap(),
+                                ""));
+        FileStoreTable table =
+                FileStoreTableFactory.create(fileIO, path, schema, CatalogEnvironment.empty());
+        String historyUser = UUID.randomUUID().toString();
+        try (TableWriteImpl<?> write = table.newWrite(historyUser);
+                TableCommitImpl commit = table.newCommit(historyUser)) {
+            for (long id = 1; id <= 3; id++) {
+                write.write(GenericRow.of((int) id, id));
+                commit.commit(id, write.prepareCommit(false, id));
+            }
+        }
+
+        if (strictMode) {
+            table =
+                    table.copy(
+                            singletonMap(
+                                    CoreOptions.COMMIT_STRICT_MODE_LAST_SAFE_SNAPSHOT.key(), "2"));
+        }
+        String commitUser = UUID.randomUUID().toString();
+        ManifestCommittable committable = new ManifestCommittable(4L);
+        try (TableWriteImpl<?> write = table.newWrite(commitUser)) {
+            write.write(GenericRow.of(4, 4L));
+            write.prepareCommit(false, 4L).forEach(committable::addFileCommittable);
+        }
+        try (FileStoreCommit commit = table.store().newCommit(commitUser, table)) {
+            snapshotReads.clear();
+            assertThat(commit.filterCommitted(Collections.singletonList(committable)))
+                    .containsExactly(committable);
+            assertThat(snapshotReads)
+                    .containsExactlyElementsOf(
+                            strictMode
+                                    ? Collections.singletonList("snapshot-3")
+                                    : Arrays.asList("snapshot-3", "snapshot-2", "snapshot-1"));
+
+            commit.commit(committable, true);
+            // The conflict-check safe point advances after publication. Retry lookup must still
+            // include this user's published snapshot, including when reusing this committer.
+            assertThat(commit.filterCommitted(Collections.singletonList(committable))).isEmpty();
+            ManifestCommittable next = new ManifestCommittable(5L);
+            assertThat(commit.filterCommitted(Arrays.asList(committable, next)))
+                    .containsExactly(next);
+        }
+        // Recovery with the same user and original options must also deduplicate publication.
+        try (FileStoreCommit restoredCommit = table.store().newCommit(commitUser, table)) {
+            assertThat(restoredCommit.filterCommitted(Collections.singletonList(committable)))
+                    .isEmpty();
+        }
+    }
 
     @Test
     public void testCommitCallbackWithFailureFixedBucket() throws Exception {

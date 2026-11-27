@@ -128,6 +128,7 @@ public class FileStoreCommitImpl implements FileStoreCommit {
     private final String tableName;
     private final String commitUser;
     private final RowType partitionType;
+    private final CoreOptions options;
     private final String partitionDefaultName;
     private final FileStorePathFactory pathFactory;
     private final SnapshotManager snapshotManager;
@@ -202,6 +203,7 @@ public class FileStoreCommitImpl implements FileStoreCommit {
         this.tableName = tableName;
         this.commitUser = commitUser;
         this.partitionType = partitionType;
+        this.options = options;
         this.partitionDefaultName = partitionDefaultName;
         this.pathFactory = pathFactory;
         this.snapshotManager = snapshotManager;
@@ -269,7 +271,18 @@ public class FileStoreCommitImpl implements FileStoreCommit {
                     "Committables must be sorted according to identifiers before filtering. This is unexpected.");
         }
 
-        Optional<Snapshot> latestSnapshot = snapshotManager.latestSnapshotOfUser(commitUser);
+        Optional<Long> optionalStrictSnapshot = options.commitStrictModeLastSafeSnapshot();
+        Optional<Snapshot> latestSnapshot;
+        if (optionalStrictSnapshot.isPresent()) {
+            latestSnapshot =
+                    snapshotManager.latestSnapshotOfUser(
+                            commitUser,
+                            snapshotManager.latestSnapshotId(),
+                            optionalStrictSnapshot.get() + 1);
+        } else {
+            latestSnapshot = snapshotManager.latestSnapshotOfUser(commitUser);
+        }
+
         if (latestSnapshot.isPresent()) {
             List<ManifestCommittable> result = new ArrayList<>();
             for (ManifestCommittable committable : committables) {
